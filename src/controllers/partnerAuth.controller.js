@@ -270,6 +270,7 @@
 //     portfolio_value: p.portfolio_value || 0,
 //   };
 // }
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { supabase } from "../config/supabase.js";
 const AVATAR_BUCKET = "avatars";
@@ -291,7 +292,7 @@ export const partnerLogin = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
-    const isValid = (partner.password === password);
+    const isValid = await bcrypt.compare(password, partner.password);
     if (!isValid) {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }

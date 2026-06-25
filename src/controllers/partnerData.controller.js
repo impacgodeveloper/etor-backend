@@ -146,9 +146,6 @@ export const getMyTransactions = async (req, res, next) => {
 // GET /api/partner/documents
 export const getMyDocuments = async (req, res, next) => {
   try {
-    console.log("🔍 req.user =", req.user);
-    console.log("🔍 Looking for related_user_id =", req.user.id);
-
     const { data, error } = await supabase
       .from("documents")
       .select("*")
