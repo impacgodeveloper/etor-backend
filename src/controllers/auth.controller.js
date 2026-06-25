@@ -22,29 +22,10 @@ export const login = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
-    console.log("USER:", user);
-console.log("ERROR:", error);
-
-if (!user) {
-  return res.status(401).json({
-    success: false,
-    message: "User not found"
-  });
-}
-
-const isValid = await bcrypt.compare(
-  password,
-  user.password
-);
-
-console.log("VALID:", isValid);
-
-if (!isValid) {
-  return res.status(401).json({
-    success: false,
-    message: "Invalid email or password"
-  });
-}
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) {
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
+    }
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
@@ -79,9 +60,6 @@ export const getMe = async (req, res, next) => {
   .eq("email", email.toLowerCase().trim())
   .eq("is_active", true)
   .single();
-
-console.log("USER:", user);
-console.log("ERROR:", error);
 
     if (error || !user) {
       return res.status(404).json({ success: false, message: "User not found" });

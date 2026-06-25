@@ -119,12 +119,12 @@ export const updateAdminVisitRequest = async (req, res, next) => {
       ? `Your ${visit.visit_type} request could not be accommodated. ${admin_note ? `Note: ${admin_note}` : "Please reschedule."}`
       : `Your visit request status has been updated to: ${status}`;
 
-    await supabase.from("notifications").insert([{
+    supabase.from("notifications").insert([{
       partner_id: visit.partner_id,
       title: notifTitle,
       message: notifMsg,
       type: "visit_update",
-    }]);
+    }]).catch((e) => console.error("Notification insert failed:", e.message));
 
     res.status(200).json({ success: true, data: { ...visit, partner_name: visit.partners?.name } });
   } catch (err) {
@@ -183,12 +183,12 @@ export const updateAdminTransferRequest = async (req, res, next) => {
       ? `Your ownership transfer request for ${transfer.asset_type} has been approved!`
       : `Your ownership transfer request status: ${status}. ${admin_note ? `Note: ${admin_note}` : ""}`;
 
-    await supabase.from("notifications").insert([{
+    supabase.from("notifications").insert([{
       partner_id: transfer.from_partner_id,
       title: status === "approved" ? "Transfer Approved!" : "Transfer Request Update",
       message: notifMsg,
       type: "transfer_update",
-    }]);
+    }]).catch((e) => console.error("Notification insert failed:", e.message));
 
     res.status(200).json({ success: true, data: { ...transfer, partner_name: transfer.partners?.name } });
   } catch (err) {
@@ -277,12 +277,12 @@ export const replyToSupportMessage = async (req, res, next) => {
 
     // Notify partner that admin replied
     const preview = message.trim().length > 80 ? message.trim().substring(0, 80) + "…" : message.trim();
-    await supabase.from("notifications").insert([{
+    supabase.from("notifications").insert([{
       partner_id: req.params.partnerId,
       title: "New message from Admin",
       message: preview,
       type: "support_reply",
-    }]);
+    }]).catch((e) => console.error("Notification insert failed:", e.message));
 
     res.status(201).json({ success: true, data });
   } catch (err) {

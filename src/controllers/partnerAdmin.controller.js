@@ -1,3 +1,4 @@
+import bcrypt from "bcryptjs";
 import { supabase } from "../config/supabase.js";
 
 // GET /api/partners
@@ -36,16 +37,18 @@ export const getPartnerById = async (req, res, next) => {
 export const createPartner = async (req, res, next) => {
   try {
     const { name, email, phone, address, portfolio_value, profile_image_url, password } = req.body;
-    if (!name || !email) {
-      return res.status(400).json({ success: false, message: "name and email are required" });
+    if (!name || !email || !password) {
+      return res.status(400).json({ success: false, message: "name, email and password are required" });
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const { data, error } = await supabase
       .from("partners")
       .insert([{
         name, email: email.toLowerCase().trim(), phone, address,
         portfolio_value: portfolio_value || 0,
-        profile_image_url, password,
+        profile_image_url, password: hashedPassword,
       }])
       .select()
       .single();
@@ -65,6 +68,7 @@ export const updatePartner = async (req, res, next) => {
   try {
     const updates = { ...req.body };
     if (updates.email) updates.email = updates.email.toLowerCase().trim();
+    if (updates.password) updates.password = await bcrypt.hash(updates.password, 10);
 
     const { data, error } = await supabase
       .from("partners")

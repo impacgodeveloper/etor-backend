@@ -111,9 +111,6 @@ app.get("/api/test-api-table", async (req, res) => {
       .from("test_api")
       .select("*");
 
-    console.log("DATA:", data);
-    console.log("ERROR:", error);
-
     res.json({ data, error });
   } catch (err) {
     console.error(err);
@@ -187,6 +184,21 @@ app.delete("/api/payments/:id", authenticate, deletePayment);
 // ============================================================
 // ADMIN COW ROUTES
 // ============================================================
+app.get("/api/cows/farms", authenticate, async (req, res) => {
+  try {
+    const { default: fetch } = await import("node-fetch").catch(() => ({ default: globalThis.fetch }));
+    const baseUrl = process.env.DFMS_API_URL || "https://dfms.impacgo.com";
+    const token = process.env.DFMS_ADMIN_TOKEN || "";
+    const response = await fetch(`${baseUrl}/api/admins`, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    });
+    if (!response.ok) return res.status(200).json({ success: true, data: [] });
+    const data = await response.json();
+    res.status(200).json({ success: true, data: Array.isArray(data) ? data : [] });
+  } catch {
+    res.status(200).json({ success: true, data: [] });
+  }
+});
 app.get("/api/cows", authenticate, getAllCows);
 app.post("/api/cows", authenticate, createCow);
 app.get("/api/cows/dfms/list", authenticate, getDfmsCows);
