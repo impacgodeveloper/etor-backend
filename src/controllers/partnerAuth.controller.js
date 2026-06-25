@@ -292,7 +292,18 @@ export const partnerLogin = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
-    const isValid = await bcrypt.compare(password, partner.password);
+    const isBcryptHash = partner.password && partner.password.startsWith('$2');
+    let isValid;
+    if (isBcryptHash) {
+      isValid = await bcrypt.compare(password, partner.password);
+    } else {
+      isValid = (partner.password === password);
+      if (isValid) {
+        const hashed = await bcrypt.hash(password, 10);
+        await supabase.from('partners').update({ password: hashed }).eq('id', partner.id);
+      }
+    }
+
     if (!isValid) {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
