@@ -38,13 +38,13 @@ export const createEmployee = async (req, res, next) => {
     }
 
     const normalizedUsername = username.toLowerCase().trim();
-    const password_hash = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const { data, error } = await supabase
       .from("admin_users")
       .insert([{
         email: normalizedUsername,
-        password_hash,
+        password: hashedPassword,
         name: username.trim(),
         role: roleTitle,
         is_employee: true,
@@ -78,7 +78,7 @@ export const updateEmployee = async (req, res, next) => {
       if (password.length < 4) {
         return res.status(400).json({ success: false, message: "Password must be at least 4 characters" });
       }
-      updates.password_hash = await bcrypt.hash(password, 10);
+      updates.password = await bcrypt.hash(password, 10);
     }
 
     const { data, error } = await supabase
