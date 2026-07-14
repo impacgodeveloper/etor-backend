@@ -1,4 +1,5 @@
 import { supabase } from "../config/supabase.js";
+import { wouldCreateCycle } from "../utils/hierarchy.js";
 
 // ============================================================
 // SALES TEAM
@@ -21,7 +22,7 @@ export const getAllTeamMembers = async (req, res, next) => {
 // POST /api/sales/team
 export const createTeamMember = async (req, res, next) => {
   try {
-    const { name, roleTitle, branch, email, phone, commissionRate, target } = req.body;
+    const { name, roleTitle, branch, email, phone, commissionRate, target, reportsToId } = req.body;
     if (!name || !roleTitle) {
       return res.status(400).json({ success: false, message: "name and roleTitle are required" });
     }
@@ -36,6 +37,7 @@ export const createTeamMember = async (req, res, next) => {
         phone: phone || null,
         commission_rate: commissionRate ?? 1.0,
         target: target ?? 0,
+        reports_to_id: reportsToId || null,
       }])
       .select()
       .single();
@@ -50,7 +52,7 @@ export const createTeamMember = async (req, res, next) => {
 // PUT /api/sales/team/:id
 export const updateTeamMember = async (req, res, next) => {
   try {
-    const { target, commissionRate, roleTitle, branch, phone, email } = req.body;
+    const { target, commissionRate, roleTitle, branch, phone, email, reportsToId } = req.body;
     const updates = {};
     if (target !== undefined) updates.target = target;
     if (commissionRate !== undefined) updates.commission_rate = commissionRate;
@@ -58,6 +60,16 @@ export const updateTeamMember = async (req, res, next) => {
     if (branch !== undefined) updates.branch = branch;
     if (phone !== undefined) updates.phone = phone;
     if (email !== undefined) updates.email = email;
+
+    if (reportsToId !== undefined) {
+      if (reportsToId === req.params.id) {
+        return res.status(400).json({ success: false, message: "An agent can't report to themselves" });
+      }
+      if (reportsToId && (await wouldCreateCycle("sales_team_members", req.params.id, reportsToId))) {
+        return res.status(400).json({ success: false, message: "That would create a reporting cycle" });
+      }
+      updates.reports_to_id = reportsToId || null;
+    }
 
     const { data, error } = await supabase
       .from("sales_team_members")

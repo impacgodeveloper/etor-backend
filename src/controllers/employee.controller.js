@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { supabase } from "../config/supabase.js";
+import { wouldCreateCycle } from "../utils/hierarchy.js";
 
 // Employees are rows in admin_users (is_employee = true) — they log in
 // through the same /api/auth/login as the super admin, just with a
@@ -10,7 +11,7 @@ export const getAllEmployees = async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from("admin_users")
-      .select("id, email, name, role, allowed_modules, is_active, created_at")
+      .select("id, email, name, role, allowed_modules, is_active, reports_to_id, created_at")
       .eq("is_employee", true)
       .order("created_at", { ascending: false });
 
@@ -22,10 +23,10 @@ export const getAllEmployees = async (req, res, next) => {
 };
 
 // POST /api/employees
-// body: { username, password, roleTitle, allowedModuleIndices }
+// body: { username, password, roleTitle, allowedModuleIndices, reportsToId }
 export const createEmployee = async (req, res, next) => {
   try {
-    const { username, password, roleTitle, allowedModuleIndices } = req.body;
+    const { username, password, roleTitle, allowedModuleIndices, reportsToId } = req.body;
 
     if (!username || !password || !roleTitle) {
       return res.status(400).json({ success: false, message: "username, password and roleTitle are required" });
@@ -50,9 +51,10 @@ export const createEmployee = async (req, res, next) => {
         is_employee: true,
         allowed_modules: allowedModuleIndices,
         is_active: true,
+        reports_to_id: reportsToId || null,
         created_by: req.user?.id || null,
       }])
-      .select("id, email, name, role, allowed_modules, is_active, created_at")
+      .select("id, email, name, role, allowed_modules, is_active, reports_to_id, created_at")
       .single();
 
     if (error) {
@@ -66,10 +68,10 @@ export const createEmployee = async (req, res, next) => {
 };
 
 // PUT /api/employees/:id
-// body: any of { roleTitle, allowedModuleIndices, password, isActive }
+// body: any of { roleTitle, allowedModuleIndices, password, isActive, reportsToId }
 export const updateEmployee = async (req, res, next) => {
   try {
-    const { roleTitle, allowedModuleIndices, password, isActive } = req.body;
+    const { roleTitle, allowedModuleIndices, password, isActive, reportsToId } = req.body;
     const updates = {};
     if (roleTitle !== undefined) updates.role = roleTitle;
     if (allowedModuleIndices !== undefined) updates.allowed_modules = allowedModuleIndices;
@@ -80,13 +82,22 @@ export const updateEmployee = async (req, res, next) => {
       }
       updates.password = await bcrypt.hash(password, 10);
     }
+    if (reportsToId !== undefined) {
+      if (reportsToId === req.params.id) {
+        return res.status(400).json({ success: false, message: "An employee can't report to themselves" });
+      }
+      if (reportsToId && (await wouldCreateCycle("admin_users", req.params.id, reportsToId))) {
+        return res.status(400).json({ success: false, message: "That would create a reporting cycle" });
+      }
+      updates.reports_to_id = reportsToId || null;
+    }
 
     const { data, error } = await supabase
       .from("admin_users")
       .update(updates)
       .eq("id", req.params.id)
       .eq("is_employee", true)
-      .select("id, email, name, role, allowed_modules, is_active, created_at")
+      .select("id, email, name, role, allowed_modules, is_active, reports_to_id, created_at")
       .single();
 
     if (error) throw error;
