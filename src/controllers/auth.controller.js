@@ -42,6 +42,8 @@ export const login = async (req, res, next) => {
           email: user.email,
           name: user.name,
           role: user.role,
+          is_employee: user.is_employee || false,
+          allowed_modules: user.allowed_modules || null,
         },
       },
     });
