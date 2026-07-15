@@ -3,16 +3,34 @@ import { supabase } from "../config/supabase.js";
 import { getDirectReportIds } from "../utils/hierarchy.js";
 
 const BUCKET = "receipts";
-// employee_id always refers to a row in employee_accounts — admin_users is
-// admin-only and doesn't submit/own travel expenses.
-const EXPENSE_SELECT = "*, employee_accounts:employee_id(name, role_title)";
+// employee_id is usually an employee_accounts id, but has no FK constraint —
+// the super admin can also submit their own expense (employee_id = an
+// admin_users id), and Postgres can't FK a column to "one of two tables".
+// That also means we can't use Supabase's auto-embed (`select("*, x:y(...)")`)
+// since PostgREST needs a declared FK to know the relationship — so employee
+// name/role are looked up and merged in JS instead (see _attachEmployeeInfo).
+const EXPENSE_SELECT = "*";
 
-const mapExpense = (row) => ({
-  ...row,
-  employee_name: row.employee_accounts?.name || "Unknown",
-  employee_role: row.employee_accounts?.role_title || "",
-  employee_accounts: undefined,
-});
+const _attachEmployeeInfo = async (rows) => {
+  const ids = [...new Set(rows.map((r) => r.employee_id))];
+  if (ids.length === 0) return rows;
+
+  const [{ data: employees }, { data: admins }] = await Promise.all([
+    supabase.from("employee_accounts").select("id, name, role_title").in("id", ids),
+    supabase.from("admin_users").select("id, name, role").in("id", ids),
+  ]);
+
+  const infoById = new Map();
+  for (const a of admins || []) infoById.set(a.id, { name: a.name, role: a.role || "Super Admin" });
+  for (const e of employees || []) infoById.set(e.id, { name: e.name, role: e.role_title });
+
+  return rows.map((r) => {
+    const info = infoById.get(r.employee_id);
+    return { ...r, employee_name: info?.name || "Unknown", employee_role: info?.role || "" };
+  });
+};
+
+const _attachEmployeeInfoSingle = async (row) => (await _attachEmployeeInfo([row]))[0];
 
 // True if the caller (from the JWT) is the super admin, i.e. their id is an
 // admin_users row rather than an employee_accounts row.
@@ -30,7 +48,7 @@ export const getMyExpenses = async (req, res, next) => {
       .eq("employee_id", req.user.id)
       .order("created_at", { ascending: false });
     if (error) throw error;
-    res.status(200).json({ success: true, count: data.length, data: data.map(mapExpense) });
+    res.status(200).json({ success: true, count: data.length, data: await _attachEmployeeInfo(data) });
   } catch (err) {
     next(err);
   }
@@ -53,7 +71,7 @@ export const getTeamExpenses = async (req, res, next) => {
       .in("employee_id", reportIds)
       .order("created_at", { ascending: false });
     if (error) throw error;
-    res.status(200).json({ success: true, count: data.length, data: data.map(mapExpense) });
+    res.status(200).json({ success: true, count: data.length, data: await _attachEmployeeInfo(data) });
   } catch (err) {
     next(err);
   }
@@ -71,7 +89,7 @@ export const getAllExpenses = async (req, res, next) => {
       .select(EXPENSE_SELECT)
       .order("created_at", { ascending: false });
     if (error) throw error;
-    res.status(200).json({ success: true, count: data.length, data: data.map(mapExpense) });
+    res.status(200).json({ success: true, count: data.length, data: await _attachEmployeeInfo(data) });
   } catch (err) {
     next(err);
   }
@@ -133,7 +151,7 @@ export const createExpense = async (req, res, next) => {
       .single();
 
     if (error) throw error;
-    res.status(201).json({ success: true, data: mapExpense(data) });
+    res.status(201).json({ success: true, data: await _attachEmployeeInfoSingle(data) });
   } catch (err) {
     next(err);
   }
@@ -184,7 +202,7 @@ export const updateExpenseStatus = async (req, res, next) => {
       .select(EXPENSE_SELECT)
       .single();
     if (error) throw error;
-    res.status(200).json({ success: true, data: mapExpense(data) });
+    res.status(200).json({ success: true, data: await _attachEmployeeInfoSingle(data) });
   } catch (err) {
     next(err);
   }
@@ -213,7 +231,7 @@ export const reimburseExpense = async (req, res, next) => {
       .select(EXPENSE_SELECT)
       .single();
     if (error) throw error;
-    res.status(200).json({ success: true, data: mapExpense(data) });
+    res.status(200).json({ success: true, data: await _attachEmployeeInfoSingle(data) });
   } catch (err) {
     next(err);
   }
