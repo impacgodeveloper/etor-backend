@@ -42,8 +42,9 @@ export const login = async (req, res, next) => {
           email: user.email,
           name: user.name,
           role: user.role,
-          is_employee: user.is_employee || false,
-          allowed_modules: user.allowed_modules || null,
+          is_employee: user.is_employee,
+          allowed_modules: user.allowed_modules,
+          reports_to_id: user.reports_to_id,
         },
       },
     });
