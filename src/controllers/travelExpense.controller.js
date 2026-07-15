@@ -128,6 +128,12 @@ export const createExpense = async (req, res, next) => {
       receipt_file_name = req.file.originalname;
     }
 
+    // A trip made in a company vehicle needs no manager sign-off — it's
+    // auto-approved on submission. A trip in the employee's own vehicle
+    // still goes through the normal pending → manager-approval flow below
+    // (updateExpenseStatus), unchanged.
+    const autoApproved = modeOfTravel === "Company Vehicle";
+
     const { data, error } = await supabase
       .from("travel_expenses")
       .insert([{
@@ -145,7 +151,11 @@ export const createExpense = async (req, res, next) => {
         description: description || null,
         receipt_url,
         receipt_file_name,
-        status: "pending",
+        status: autoApproved ? "approved" : "pending",
+        ...(autoApproved ? {
+          approved_at: new Date().toISOString(),
+          admin_note: "Auto-approved — company vehicle, no manager approval required",
+        } : {}),
       }])
       .select(EXPENSE_SELECT)
       .single();
