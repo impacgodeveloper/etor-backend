@@ -56,6 +56,11 @@ import {
   getMyExpenses, getTeamExpenses, getAllExpenses,
   createExpense, updateExpenseStatus, reimburseExpense, deleteExpense,
 } from "./src/controllers/travelExpense.controller.js";
+import {
+  getAllTeamMembers, createTeamMember, updateTeamMember, deleteTeamMember,
+  getAllLeads, createLead, updateLead, deleteLead, addLeadNote, convertLeadToBooking,
+  getAllBookings,
+} from "./src/controllers/sales.controller.js";
 
 // ── Partner Controllers ──────────────────────────────────────
 import {
@@ -216,25 +221,6 @@ app.post("/api/payments", authenticate, createPayment);
 app.delete("/api/payments/:id", authenticate, deletePayment);
 
 // ============================================================
-// ADMIN EMPLOYEE ROUTES
-// ============================================================
-app.get("/api/employees", authenticate, getAllEmployees);
-app.post("/api/employees", authenticate, createEmployee);
-app.put("/api/employees/:id", authenticate, updateEmployee);
-app.delete("/api/employees/:id", authenticate, deleteEmployee);
-
-// ============================================================
-// ADMIN TRAVEL EXPENSE ROUTES
-// ============================================================
-app.get("/api/travel-expenses/mine", authenticate, getMyExpenses);
-app.get("/api/travel-expenses/team", authenticate, getTeamExpenses);
-app.get("/api/travel-expenses", authenticate, getAllExpenses);
-app.post("/api/travel-expenses", authenticate, upload.single("file"), createExpense);
-app.patch("/api/travel-expenses/:id/status", authenticate, updateExpenseStatus);
-app.patch("/api/travel-expenses/:id/reimburse", authenticate, reimburseExpense);
-app.delete("/api/travel-expenses/:id", authenticate, deleteExpense);
-
-// ============================================================
 // ADMIN COW ROUTES
 // ============================================================
 app.get("/api/cows/farms", authenticate, async (req, res) => {
@@ -287,6 +273,43 @@ app.patch("/api/admin/requests/transfers/:id", authenticate, updateAdminTransfer
 app.get("/api/admin/requests/support", authenticate, getAdminSupportMessages);
 app.get("/api/admin/support/:partnerId/thread", authenticate, getAdminSupportThread);
 app.post("/api/admin/requests/support/:partnerId/reply", authenticate, replyToSupportMessage);
+
+// ============================================================
+// EMPLOYEE ROUTES (admin_users rows with is_employee = true —
+// they log in via the same /api/auth/login above)
+// ============================================================
+app.get("/api/employees", authenticate, getAllEmployees);
+app.post("/api/employees", authenticate, createEmployee);
+app.put("/api/employees/:id", authenticate, updateEmployee);
+app.delete("/api/employees/:id", authenticate, deleteEmployee);
+
+// ============================================================
+// ADMIN TRAVEL EXPENSE ROUTES
+// ============================================================
+app.get("/api/travel-expenses/mine", authenticate, getMyExpenses);
+app.get("/api/travel-expenses/team", authenticate, getTeamExpenses);
+app.get("/api/travel-expenses", authenticate, getAllExpenses);
+app.post("/api/travel-expenses", authenticate, upload.single("file"), createExpense);
+app.patch("/api/travel-expenses/:id/status", authenticate, updateExpenseStatus);
+app.patch("/api/travel-expenses/:id/reimburse", authenticate, reimburseExpense);
+app.delete("/api/travel-expenses/:id", authenticate, deleteExpense);
+
+// ============================================================
+// SALES ROUTES (real estate sales team CRM)
+// ============================================================
+app.get("/api/sales/team", authenticate, getAllTeamMembers);
+app.post("/api/sales/team", authenticate, createTeamMember);
+app.put("/api/sales/team/:id", authenticate, updateTeamMember);
+app.delete("/api/sales/team/:id", authenticate, deleteTeamMember);
+
+app.get("/api/sales/leads", authenticate, getAllLeads);
+app.post("/api/sales/leads", authenticate, createLead);
+app.put("/api/sales/leads/:id", authenticate, updateLead);
+app.delete("/api/sales/leads/:id", authenticate, deleteLead);
+app.post("/api/sales/leads/:id/notes", authenticate, addLeadNote);
+app.post("/api/sales/leads/:id/convert", authenticate, convertLeadToBooking);
+
+app.get("/api/sales/bookings", authenticate, getAllBookings);
 
 // ============================================================
 // PARTNER AUTH ROUTES (separate JWT, role: "partner")
