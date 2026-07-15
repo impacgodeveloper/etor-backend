@@ -7,7 +7,7 @@ import { ADMIN_ROLE, canCreateRole, getRequiredManagerRole, wouldCreateCycle } f
 // admin_users stays "admin data only". The two tables share the same login
 // endpoint (see auth.controller.js), so nothing about how a user logs in or
 // how permissions are enforced in the Flutter app changes.
-const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at";
+const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at, contact_email, phone_number";
 
 // Every newly created (or renamed) employee is also mirrored into
 // sales_team_members so they immediately show up in the Sales module's team
@@ -21,6 +21,7 @@ const _mirrorTeamMemberInsert = async ({ name, roleTitle, email }) => {
     commission_rate: 1.0,
     target: 0,
   }]);
+  
   if (error) console.error("sales_team_members mirror insert failed:", error.message);
 };
 
@@ -74,9 +75,9 @@ export const getAllEmployees = async (req, res, next) => {
 // POST /api/employees
 export const createEmployee = async (req, res, next) => {
   try {
-    const { username, password, roleTitle, allowedModuleIndices, reportsToId } = req.body;
-    if (!username || !password || !roleTitle) {
-      return res.status(400).json({ success: false, message: "username, password and roleTitle are required" });
+    const { username, password, roleTitle, allowedModuleIndices, reportsToId, contactEmail, phoneNumber } = req.body;
+    if (!username || !password || !roleTitle || !contactEmail || !phoneNumber) {
+      return res.status(400).json({ success: false, message: "username, password, roleTitle, contactEmail and phoneNumber are required" });
     }
 
     const caller = await _resolveCaller(req.user.id);
@@ -131,6 +132,8 @@ export const createEmployee = async (req, res, next) => {
         allowed_modules: allowedModuleIndices ?? [],
         is_active: true,
         reports_to_id: resolvedReportsTo,
+        contact_email: contactEmail.trim().toLowerCase(),
+        phone_number: phoneNumber.trim(),
       }])
       .select(EMPLOYEE_FIELDS)
       .single();
