@@ -30,6 +30,11 @@ import {
   getAllPartners, getPartnerById, createPartner, updatePartner, deletePartner,
 } from "./src/controllers/partnerAdmin.controller.js";
 import {
+  getAllTeam, addTeamMember, updateTeamMember, deleteTeamMember,
+  getAllLeads, addLead, updateLead, deleteLead, addLeadNote, convertLeadToBooking,
+  getAllBookings,
+} from "./src/controllers/sales.controller.js";
+import {
   getAllDocuments, getDocumentById, uploadDocument, deleteDocument,
 } from "./src/controllers/document.controller.js";
 import {
@@ -195,7 +200,22 @@ app.put("/api/plots/:id", authenticate, updatePlot);
 app.patch("/api/plots/:id/status", authenticate, updatePlotStatus);
 app.patch("/api/plots/:id/payment", authenticate, updatePayment);
 app.delete("/api/plots/:id", authenticate, deletePlot);
+// ============================================================
+// ADMIN SALES ROUTES (hierarchy-scoped — see sales.controller.js)
+// ============================================================
+app.get("/api/sales/team", authenticate, getAllTeam);
+app.post("/api/sales/team", authenticate, addTeamMember);
+app.put("/api/sales/team/:id", authenticate, updateTeamMember);
+app.delete("/api/sales/team/:id", authenticate, deleteTeamMember);
 
+app.get("/api/sales/leads", authenticate, getAllLeads);
+app.post("/api/sales/leads", authenticate, addLead);
+app.put("/api/sales/leads/:id", authenticate, updateLead);
+app.delete("/api/sales/leads/:id", authenticate, deleteLead);
+app.post("/api/sales/leads/:id/notes", authenticate, addLeadNote);
+app.post("/api/sales/leads/:id/convert", authenticate, convertLeadToBooking);
+
+app.get("/api/sales/bookings", authenticate, getAllBookings);
 // ============================================================
 // ADMIN PARTNER ROUTES
 // ============================================================
