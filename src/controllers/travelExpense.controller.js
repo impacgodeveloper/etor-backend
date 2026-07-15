@@ -3,14 +3,23 @@ import { supabase } from "../config/supabase.js";
 import { getDirectReportIds } from "../utils/hierarchy.js";
 
 const BUCKET = "receipts";
-const EXPENSE_SELECT = "*, admin_users:employee_id(name, role)";
+// employee_id always refers to a row in employee_accounts — admin_users is
+// admin-only and doesn't submit/own travel expenses.
+const EXPENSE_SELECT = "*, employee_accounts:employee_id(name, role_title)";
 
 const mapExpense = (row) => ({
   ...row,
-  employee_name: row.admin_users?.name || "Unknown",
-  employee_role: row.admin_users?.role || "",
-  admin_users: undefined,
+  employee_name: row.employee_accounts?.name || "Unknown",
+  employee_role: row.employee_accounts?.role_title || "",
+  employee_accounts: undefined,
 });
+
+// True if the caller (from the JWT) is the super admin, i.e. their id is an
+// admin_users row rather than an employee_accounts row.
+const _isCallerSuperAdmin = async (callerId) => {
+  const { data } = await supabase.from("admin_users").select("id").eq("id", callerId).maybeSingle();
+  return !!data;
+};
 
 // GET /api/travel-expenses/mine
 export const getMyExpenses = async (req, res, next) => {
@@ -30,7 +39,7 @@ export const getMyExpenses = async (req, res, next) => {
 // GET /api/travel-expenses/team
 export const getTeamExpenses = async (req, res, next) => {
   try {
-    const { data: rows, error: rowsError } = await supabase.from("admin_users").select("id, reports_to_id");
+    const { data: rows, error: rowsError } = await supabase.from("employee_accounts").select("id, reports_to_id");
     if (rowsError) throw rowsError;
     const reportIds = getDirectReportIds(rows, req.user.id);
 
@@ -53,8 +62,7 @@ export const getTeamExpenses = async (req, res, next) => {
 // GET /api/travel-expenses (super admin only)
 export const getAllExpenses = async (req, res, next) => {
   try {
-    const { data: caller } = await supabase.from("admin_users").select("is_employee").eq("id", req.user.id).single();
-    if (caller?.is_employee === true) {
+    if (!(await _isCallerSuperAdmin(req.user.id))) {
       return res.status(403).json({ success: false, message: "Only the super admin can view all expenses" });
     }
 
@@ -139,11 +147,8 @@ const _resolveExpenseAndAuthorize = async (req) => {
   if (expenseError || !expense) return { error: { status: 404, message: "Expense not found" } };
 
   const { data: owner } = await supabase
-    .from("admin_users").select("reports_to_id").eq("id", expense.employee_id).single();
-  const { data: caller } = await supabase
-    .from("admin_users").select("is_employee").eq("id", req.user.id).single();
-
-  const isSuperAdmin = caller?.is_employee !== true;
+    .from("employee_accounts").select("reports_to_id").eq("id", expense.employee_id).maybeSingle();
+  const isSuperAdmin = await _isCallerSuperAdmin(req.user.id);
   const isDirectManager = owner?.reports_to_id === req.user.id;
   if (!isSuperAdmin && !isDirectManager) {
     return { error: { status: 403, message: "You are not authorized to act on this expense" } };
@@ -221,8 +226,7 @@ export const deleteExpense = async (req, res, next) => {
       .from("travel_expenses").select("employee_id, status, receipt_url").eq("id", req.params.id).single();
     if (fetchError || !expense) return res.status(404).json({ success: false, message: "Expense not found" });
 
-    const { data: caller } = await supabase.from("admin_users").select("is_employee").eq("id", req.user.id).single();
-    const isSuperAdmin = caller?.is_employee !== true;
+    const isSuperAdmin = await _isCallerSuperAdmin(req.user.id);
     const isOwner = expense.employee_id === req.user.id;
     if (!isSuperAdmin && !isOwner) {
       return res.status(403).json({ success: false, message: "You are not authorized to delete this expense" });
