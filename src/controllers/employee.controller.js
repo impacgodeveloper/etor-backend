@@ -132,7 +132,7 @@ export const createEmployee = async (req, res, next) => {
         allowed_modules: allowedModuleIndices ?? [],
         is_active: true,
         reports_to_id: resolvedReportsTo,
-        contact_email: contactEmail.trim().toLowerCase(),
+        contact_email: contactEmail.trim(),
         phone_number: phoneNumber.trim(),
       }])
       .select(EMPLOYEE_FIELDS)
