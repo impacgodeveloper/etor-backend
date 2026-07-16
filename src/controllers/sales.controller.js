@@ -1,3 +1,4 @@
+import mime from "mime-types";
 import { supabase } from "../config/supabase.js";
 import { wouldCreateCycle } from "../utils/hierarchy.js";
 
@@ -7,6 +8,8 @@ import { wouldCreateCycle } from "../utils/hierarchy.js";
 // the live table (e.g. admin_user_id, reports_to_id) is always returned
 // without this file needing to know every column name up front.
 const TEAM_SELECT = "*";
+
+const LEAD_DOCUMENTS_BUCKET = "lead-documents";
 
 // GET /api/sales/team
 export const getTeam = async (req, res, next) => {
@@ -150,10 +153,19 @@ export const getLeads = async (req, res, next) => {
 // POST /api/sales/leads
 export const createLead = async (req, res, next) => {
   try {
-    const { name, phone, email, project, budget, temperature, source, assignedToId, author } = req.body;
+    const {
+      name, phone, email, project, budget, temperature, source, assignedToId, author,
+      marketValue, totalAmount, registrationCharges, stampDuty, userCharges,
+    } = req.body;
     if (!name || !phone) {
       return res.status(400).json({ success: false, message: "name and phone are required" });
     }
+
+    // The deal-financials fields (market value, total amount, registration
+    // charges, stamp duty, user charges) are all optional — most leads are
+    // created before any of this is known — so each is only stored when
+    // actually provided, otherwise left null rather than defaulted to 0.
+    const toNullableNumber = (v) => (v === undefined || v === null || v === "" ? null : Number(v));
 
     const { data: lead, error } = await supabase
       .from("sales_leads")
@@ -167,6 +179,11 @@ export const createLead = async (req, res, next) => {
         source: source || "Walk-in",
         assigned_to_id: assignedToId || null,
         status: "new",
+        market_value: toNullableNumber(marketValue),
+        total_amount: toNullableNumber(totalAmount),
+        registration_charges: toNullableNumber(registrationCharges),
+        stamp_duty: toNullableNumber(stampDuty),
+        user_charges: toNullableNumber(userCharges),
       }])
       .select("*")
       .single();
@@ -186,6 +203,42 @@ export const createLead = async (req, res, next) => {
     if (noteError) throw noteError;
 
     res.status(201).json({ success: true, data: { ...lead, assigned_to_name: agentName, notes: [note] } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/sales/leads/:id/document (multipart/form-data)
+// Kept separate from createLead so a plain lead can still be created with a
+// simple JSON request — the file (if any) is attached in a second step
+// right after, from the Add Lead dialog. See SalesProvider.addLead.
+export const uploadLeadDocument = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!req.file) return res.status(400).json({ success: false, message: "file is required" });
+
+    const { data: existing, error: fetchError } = await supabase.from("sales_leads").select("id").eq("id", id).maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!existing) return res.status(404).json({ success: false, message: "Lead not found" });
+
+    const filePath = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
+    const contentType = mime.lookup(req.file.originalname) || req.file.mimetype;
+    const { error: uploadError } = await supabase.storage
+      .from(LEAD_DOCUMENTS_BUCKET)
+      .upload(filePath, req.file.buffer, { contentType, upsert: false });
+    if (uploadError) throw uploadError;
+
+    const { data: urlData } = supabase.storage.from(LEAD_DOCUMENTS_BUCKET).getPublicUrl(filePath);
+
+    const { data, error } = await supabase
+      .from("sales_leads")
+      .update({ document_url: urlData.publicUrl, document_file_name: req.file.originalname })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw error;
+
+    res.status(200).json({ success: true, data });
   } catch (err) {
     next(err);
   }
