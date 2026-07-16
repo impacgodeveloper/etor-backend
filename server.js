@@ -91,30 +91,8 @@ app.use(helmet({ crossOriginResourcePolicy: false }));
 //   ALLOWED_ORIGINS=https://etor.com,https://www.etor.com
 // Any localhost/127.0.0.1 origin (any port) is always allowed,
 // since Flutter web's dev server picks a random port each run.
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests (curl, server-to-server, no Origin header)
-    if (!origin) return callback(null, true);
-
-    // Allow any localhost/127.0.0.1 port — Flutter web dev server uses random ports
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-      return callback(null, true);
-    }
-
-    // Allow explicitly whitelisted production origins
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
-  },
-  credentials: true,
-}));
+app.use(cors({}));
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
