@@ -54,7 +54,7 @@ import {
 } from "./src/controllers/employee.controller.js";
 import {
   getTeam, addTeamMember, updateTeamMember, deleteTeamMember,
-  getLeads, createLead, updateLead, deleteLead, addLeadNote, convertLeadToBooking, getBookings,
+  getLeads, createLead, updateLead, deleteLead, addLeadNote, uploadLeadDocument, convertLeadToBooking, getBookings,
 } from "./src/controllers/sales.controller.js";
 import {
   getMyExpenses, getTeamExpenses, getAllExpenses,
@@ -243,6 +243,7 @@ app.post("/api/sales/leads", authenticate, createLead);
 app.put("/api/sales/leads/:id", authenticate, updateLead);
 app.delete("/api/sales/leads/:id", authenticate, deleteLead);
 app.post("/api/sales/leads/:id/notes", authenticate, addLeadNote);
+app.post("/api/sales/leads/:id/document", authenticate, upload.single("file"), uploadLeadDocument);
 app.post("/api/sales/leads/:id/convert", authenticate, convertLeadToBooking);
 app.get("/api/sales/bookings", authenticate, getBookings);
 
