@@ -13,21 +13,111 @@ const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_a
 // sales_team_members so they immediately show up in the Sales module's team
 // roster without being re-entered there. This is a best-effort side effect —
 // it never fails the employee create/update/delete request itself.
-const _mirrorTeamMemberInsert = async ({ name, roleTitle, email }) => {
-  const { error } = await supabase.from("sales_team_members").insert([{
-    name,
-    role_title: roleTitle,
-    email,
-    commission_rate: 1.0,
-    target: 0,
-  }]);
-  
-  if (error) console.error("sales_team_members mirror insert failed:", error.message);
+const _mirrorTeamMemberInsert = async ({
+  name,
+  roleTitle,
+  email,
+  phone,
+  reportsToId,
+}) => {
+  let salesReportsToId = null;
+
+  if (reportsToId) {
+    const { data: managerEmployee } = await supabase
+      .from("employee_accounts")
+      .select("email")
+      .eq("id", reportsToId)
+      .single();
+
+    if (managerEmployee) {
+      const { data: managerSales } = await supabase
+        .from("sales_team_members")
+        .select("id")
+        .eq("email", managerEmployee.email)
+        .single();
+
+      salesReportsToId = managerSales?.id ?? null;
+    }
+  }
+
+  const { error } = await supabase.from("sales_team_members").insert([
+    {
+      name,
+      role_title: roleTitle,
+      email,
+      phone,
+      commission_rate: 1.0,
+      target: 0,
+      reports_to_id: salesReportsToId,
+    },
+  ]);
+
+  if (error) {
+    console.error(
+      "sales_team_members mirror insert failed:",
+      error.message
+    );
+  }
 };
 
 const _mirrorTeamMemberRoleUpdate = async (email, roleTitle) => {
   const { error } = await supabase.from("sales_team_members").update({ role_title: roleTitle }).eq("email", email);
   if (error) console.error("sales_team_members mirror update failed:", error.message);
+};
+
+const _mirrorTeamMemberPhoneUpdate = async (email, phone) => {
+  const { error } = await supabase
+    .from("sales_team_members")
+    .update({
+      phone,
+    })
+    .eq("email", email);
+
+  if (error) {
+    console.error(
+      "sales_team_members phone update failed:",
+      error.message
+    );
+  }
+};
+
+const _mirrorTeamMemberReportsToUpdate = async (
+  employeeEmail,
+  managerEmployeeId,
+) => {
+  let salesReportsToId = null;
+
+  if (managerEmployeeId) {
+    const { data: managerEmployee } = await supabase
+      .from("employee_accounts")
+      .select("email")
+      .eq("id", managerEmployeeId)
+      .single();
+
+    if (managerEmployee) {
+      const { data: managerSales } = await supabase
+        .from("sales_team_members")
+        .select("id")
+        .eq("email", managerEmployee.email)
+        .single();
+
+      salesReportsToId = managerSales?.id ?? null;
+    }
+  }
+
+  const { error } = await supabase
+    .from("sales_team_members")
+    .update({
+      reports_to_id: salesReportsToId,
+    })
+    .eq("email", employeeEmail);
+
+  if (error) {
+    console.error(
+      "sales_team_members reports_to update failed:",
+      error.message
+    );
+  }
 };
 
 const _mirrorTeamMemberDelete = async (email) => {
@@ -143,7 +233,13 @@ export const createEmployee = async (req, res, next) => {
       throw error;
     }
 
-    await _mirrorTeamMemberInsert({ name: username.trim(), roleTitle, email: normalizedEmail });
+    await _mirrorTeamMemberInsert({
+      name: username.trim(),
+      roleTitle,
+      email: normalizedEmail,
+      phone: phoneNumber.trim(),
+      reportsToId: resolvedReportsTo,
+    });
 
     res.status(201).json({ success: true, data });
   } catch (err) {
@@ -155,7 +251,12 @@ export const createEmployee = async (req, res, next) => {
 export const updateEmployee = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { roleTitle, allowedModuleIndices, password } = req.body;
+    const {
+      roleTitle,
+      allowedModuleIndices,
+      password,
+      phoneNumber,
+    } = req.body;
 
     const { data: existing, error: fetchError } = await supabase
       .from("employee_accounts").select("id, email, role_title, reports_to_id").eq("id", id).single();
@@ -165,6 +266,9 @@ export const updateEmployee = async (req, res, next) => {
     if (roleTitle !== undefined) updates.role_title = roleTitle;
     if (allowedModuleIndices !== undefined) updates.allowed_modules = allowedModuleIndices;
     if (password) updates.password = await bcrypt.hash(password, 10);
+    if (phoneNumber !== undefined) {
+      updates.phone_number = phoneNumber.trim();
+    }
 
     const touchesReportsTo = Object.prototype.hasOwnProperty.call(req.body, "reportsToId");
     if (touchesReportsTo) {
@@ -217,7 +321,23 @@ export const updateEmployee = async (req, res, next) => {
 
     if (error) throw error;
 
-    if (roleTitle !== undefined) await _mirrorTeamMemberRoleUpdate(existing.email, roleTitle);
+    if (touchesReportsTo) {
+      await _mirrorTeamMemberReportsToUpdate(
+        existing.email,
+        req.body.reportsToId ?? null,
+      );
+    }
+
+    if (roleTitle !== undefined) {
+      await _mirrorTeamMemberRoleUpdate(existing.email, roleTitle);
+    }
+
+    if (phoneNumber !== undefined) {
+      await _mirrorTeamMemberPhoneUpdate(
+        existing.email,
+        phoneNumber.trim(),
+      );
+    }
 
     res.status(200).json({ success: true, data });
   } catch (err) {
