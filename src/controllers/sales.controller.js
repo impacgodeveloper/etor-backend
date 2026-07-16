@@ -1,13 +1,21 @@
+import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import mime from "mime-types";
 import { supabase } from "../config/supabase.js";
 import { wouldCreateCycle } from "../utils/hierarchy.js";
+import { resolveAdminUserId } from "./employee.controller.js";
 
-// sales_team_members lives only in Supabase (no definition in database/schema.sql
-// — same as documented at schema.sql's employee_accounts mirror comment).
-// select("*") rather than an explicit column list so any column already on
-// the live table (e.g. admin_user_id, reports_to_id) is always returned
-// without this file needing to know every column name up front.
-const TEAM_SELECT = "*";
+// The Sales module's "team" is employee_accounts — there is no separate
+// sales_team_members table anymore (it held the exact same people as
+// employee_accounts, just duplicated). Column names differ slightly from
+// this file's original sales_team_members-era contract, so they're
+// aliased in the select to keep the JSON response shape — and therefore
+// the Flutter SalesProvider/SalesTeamMember model — completely unchanged:
+//   phone_number  -> phone
+//   created_at    -> joined_at
+// `password` is deliberately excluded — never send a password hash to the
+// frontend, even hashed.
+const TEAM_SELECT = "id, name, role_title, branch, email, phone:phone_number, commission_rate, target, reports_to_id, admin_user_id, joined_at:created_at";
 
 const LEAD_DOCUMENTS_BUCKET = "lead-documents";
 
@@ -15,7 +23,7 @@ const LEAD_DOCUMENTS_BUCKET = "lead-documents";
 export const getTeam = async (req, res, next) => {
   try {
     const { data, error } = await supabase
-      .from("sales_team_members")
+      .from("employee_accounts")
       .select(TEAM_SELECT)
       .order("created_at", { ascending: false });
     if (error) throw error;
@@ -26,6 +34,13 @@ export const getTeam = async (req, res, next) => {
 };
 
 // POST /api/sales/team
+// A holdover from the old sales_team_members-only flow, kept working for
+// the (currently hidden) Team tab — this now creates a full employee_accounts
+// login. Since that screen never collects a password (or, previously, even
+// required an email), both are generated when missing so this endpoint's
+// required fields stay exactly what they always were (name + roleTitle) —
+// employee_accounts' email UNIQUE NOT NULL constraint is an implementation
+// detail this endpoint absorbs, not something its caller needs to know about.
 export const addTeamMember = async (req, res, next) => {
   try {
     const { name, roleTitle, branch, email, phone, commissionRate, target, reportsToId } = req.body;
@@ -33,22 +48,33 @@ export const addTeamMember = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "name and roleTitle are required" });
     }
 
+    const normalizedEmail = (email && email.trim() ? email : `${crypto.randomUUID()}@team.placeholder.local`).toLowerCase().trim();
+    const generatedPassword = crypto.randomBytes(16).toString("hex");
+    const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+    const adminUserId = await resolveAdminUserId();
+
     const { data, error } = await supabase
-      .from("sales_team_members")
+      .from("employee_accounts")
       .insert([{
         name,
         role_title: roleTitle,
         branch: branch || null,
-        email: email || null,
-        phone: phone || null,
+        email: normalizedEmail,
+        password: hashedPassword,
+        phone_number: phone || null,
         commission_rate: commissionRate ?? 1.0,
         target: target ?? 0,
         reports_to_id: reportsToId ?? null,
+        is_active: true,
+        admin_user_id: adminUserId,
       }])
       .select(TEAM_SELECT)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === "23505") return res.status(409).json({ success: false, message: "This email is already in use" });
+      throw error;
+    }
     res.status(201).json({ success: true, data });
   } catch (err) {
     next(err);
@@ -70,7 +96,7 @@ export const updateTeamMember = async (req, res, next) => {
         return res.status(400).json({ success: false, message: "An agent can't report to themselves" });
       }
       if (reportsToId) {
-        const { data: allRows, error: rowsError } = await supabase.from("sales_team_members").select("id, reports_to_id");
+        const { data: allRows, error: rowsError } = await supabase.from("employee_accounts").select("id, reports_to_id");
         if (rowsError) throw rowsError;
         if (wouldCreateCycle(allRows, id, reportsToId)) {
           return res.status(400).json({ success: false, message: "That would create a reporting cycle" });
@@ -80,11 +106,11 @@ export const updateTeamMember = async (req, res, next) => {
     }
 
     const { data, error } = await supabase
-      .from("sales_team_members")
+      .from("employee_accounts")
       .update(updates)
       .eq("id", id)
       .select(TEAM_SELECT)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!data) return res.status(404).json({ success: false, message: "Team member not found" });
@@ -95,14 +121,17 @@ export const updateTeamMember = async (req, res, next) => {
 };
 
 // DELETE /api/sales/team/:id
+// employee_accounts and sales_team_members are the same table now, so this
+// removes the underlying employee login entirely — same as deleting them
+// from the Employees screen.
 export const deleteTeamMember = async (req, res, next) => {
   try {
     const { data: existing, error: fetchError } = await supabase
-      .from("sales_team_members").select("id").eq("id", req.params.id).maybeSingle();
+      .from("employee_accounts").select("id").eq("id", req.params.id).maybeSingle();
     if (fetchError) throw fetchError;
     if (!existing) return res.status(404).json({ success: false, message: "Team member not found" });
 
-    const { error } = await supabase.from("sales_team_members").delete().eq("id", req.params.id);
+    const { error } = await supabase.from("employee_accounts").delete().eq("id", req.params.id);
     if (error) throw error;
     res.status(200).json({ success: true, message: "Team member deleted" });
   } catch (err) {
@@ -111,7 +140,7 @@ export const deleteTeamMember = async (req, res, next) => {
 };
 
 // ── Leads ────────────────────────────────────────────────────────────────
-// sales_leads has no FK to sales_team_members (same reasoning as elsewhere
+// sales_leads has no FK to employee_accounts (same reasoning as elsewhere
 // in this codebase — keeps a lead from erroring out if its agent is later
 // removed) — assigned_to_name is resolved and merged in JS instead.
 
@@ -121,7 +150,7 @@ export const getLeads = async (req, res, next) => {
     const { data: leads, error } = await supabase.from("sales_leads").select("*").order("created_at", { ascending: false });
     if (error) throw error;
 
-    const { data: team, error: teamError } = await supabase.from("sales_team_members").select("id, name");
+    const { data: team, error: teamError } = await supabase.from("employee_accounts").select("id, name");
     if (teamError) throw teamError;
     const nameById = new Map((team ?? []).map((t) => [t.id, t.name]));
 
@@ -191,7 +220,7 @@ export const createLead = async (req, res, next) => {
 
     let agentName = null;
     if (lead.assigned_to_id) {
-      const { data: agent } = await supabase.from("sales_team_members").select("name").eq("id", lead.assigned_to_id).maybeSingle();
+      const { data: agent } = await supabase.from("employee_accounts").select("name").eq("id", lead.assigned_to_id).maybeSingle();
       agentName = agent?.name ?? null;
     }
 
@@ -319,7 +348,7 @@ export const convertLeadToBooking = async (req, res, next) => {
 
     let agentName = null;
     if (lead.assigned_to_id) {
-      const { data: agent } = await supabase.from("sales_team_members").select("name").eq("id", lead.assigned_to_id).maybeSingle();
+      const { data: agent } = await supabase.from("employee_accounts").select("name").eq("id", lead.assigned_to_id).maybeSingle();
       agentName = agent?.name ?? null;
     }
 
