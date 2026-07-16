@@ -106,3 +106,217 @@ export const deleteTeamMember = async (req, res, next) => {
     next(err);
   }
 };
+
+// ── Leads ────────────────────────────────────────────────────────────────
+// sales_leads has no FK to sales_team_members (same reasoning as elsewhere
+// in this codebase — keeps a lead from erroring out if its agent is later
+// removed) — assigned_to_name is resolved and merged in JS instead.
+
+// GET /api/sales/leads
+export const getLeads = async (req, res, next) => {
+  try {
+    const { data: leads, error } = await supabase.from("sales_leads").select("*").order("created_at", { ascending: false });
+    if (error) throw error;
+
+    const { data: team, error: teamError } = await supabase.from("sales_team_members").select("id, name");
+    if (teamError) throw teamError;
+    const nameById = new Map((team ?? []).map((t) => [t.id, t.name]));
+
+    const leadIds = leads.map((l) => l.id);
+    const notesByLead = new Map();
+    if (leadIds.length > 0) {
+      const { data: notes, error: notesError } = await supabase
+        .from("sales_notes").select("*").in("lead_id", leadIds).order("created_at", { ascending: true });
+      if (notesError) throw notesError;
+      for (const n of notes) {
+        const list = notesByLead.get(n.lead_id) ?? [];
+        list.push(n);
+        notesByLead.set(n.lead_id, list);
+      }
+    }
+
+    const data = leads.map((l) => ({
+      ...l,
+      assigned_to_name: nameById.get(l.assigned_to_id) ?? null,
+      notes: notesByLead.get(l.id) ?? [],
+    }));
+
+    res.status(200).json({ success: true, count: data.length, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/sales/leads
+export const createLead = async (req, res, next) => {
+  try {
+    const { name, phone, email, project, budget, temperature, source, assignedToId, author } = req.body;
+    if (!name || !phone) {
+      return res.status(400).json({ success: false, message: "name and phone are required" });
+    }
+
+    const { data: lead, error } = await supabase
+      .from("sales_leads")
+      .insert([{
+        name,
+        phone,
+        email: email || null,
+        project: project || null,
+        budget: Number(budget) || 0,
+        temperature: temperature || "new",
+        source: source || "Walk-in",
+        assigned_to_id: assignedToId || null,
+        status: "new",
+      }])
+      .select("*")
+      .single();
+    if (error) throw error;
+
+    let agentName = null;
+    if (lead.assigned_to_id) {
+      const { data: agent } = await supabase.from("sales_team_members").select("name").eq("id", lead.assigned_to_id).maybeSingle();
+      agentName = agent?.name ?? null;
+    }
+
+    const { data: note, error: noteError } = await supabase
+      .from("sales_notes")
+      .insert([{ lead_id: lead.id, type: "note", text: `Lead created and assigned to ${agentName ?? "an agent"}.`, author: author || "Admin" }])
+      .select("*")
+      .single();
+    if (noteError) throw noteError;
+
+    res.status(201).json({ success: true, data: { ...lead, assigned_to_name: agentName, notes: [note] } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// PUT /api/sales/leads/:id
+export const updateLead = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { temperature, status, assignedToId, nextFollowUp } = req.body;
+
+    const updates = {};
+    if (temperature !== undefined) updates.temperature = temperature;
+    if (status !== undefined) updates.status = status;
+    if (Object.prototype.hasOwnProperty.call(req.body, "assignedToId")) updates.assigned_to_id = assignedToId;
+    if (Object.prototype.hasOwnProperty.call(req.body, "nextFollowUp")) updates.next_follow_up = nextFollowUp;
+
+    const { data, error } = await supabase.from("sales_leads").update(updates).eq("id", id).select("*").maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, message: "Lead not found" });
+
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// DELETE /api/sales/leads/:id
+export const deleteLead = async (req, res, next) => {
+  try {
+    const { data: existing, error: fetchError } = await supabase
+      .from("sales_leads").select("id").eq("id", req.params.id).maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!existing) return res.status(404).json({ success: false, message: "Lead not found" });
+
+    await supabase.from("sales_notes").delete().eq("lead_id", req.params.id);
+    const { error } = await supabase.from("sales_leads").delete().eq("id", req.params.id);
+    if (error) throw error;
+
+    res.status(200).json({ success: true, message: "Lead deleted" });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/sales/leads/:id/notes
+export const addLeadNote = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { type, text, author } = req.body;
+    if (!text) return res.status(400).json({ success: false, message: "text is required" });
+
+    const { data, error } = await supabase
+      .from("sales_notes")
+      .insert([{ lead_id: id, type: type || "note", text, author: author || "Admin" }])
+      .select("*")
+      .single();
+    if (error) throw error;
+
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/sales/leads/:id/convert
+export const convertLeadToBooking = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { unitNo, amount, paymentPlan, author } = req.body;
+    if (!unitNo || amount === undefined || amount === null || !paymentPlan) {
+      return res.status(400).json({ success: false, message: "unitNo, amount and paymentPlan are required" });
+    }
+
+    const { data: lead, error: leadError } = await supabase.from("sales_leads").select("*").eq("id", id).maybeSingle();
+    if (leadError) throw leadError;
+    if (!lead) return res.status(404).json({ success: false, message: "Lead not found" });
+
+    let agentName = null;
+    if (lead.assigned_to_id) {
+      const { data: agent } = await supabase.from("sales_team_members").select("name").eq("id", lead.assigned_to_id).maybeSingle();
+      agentName = agent?.name ?? null;
+    }
+
+    const { data: booking, error: bookingError } = await supabase
+      .from("sales_bookings")
+      .insert([{
+        lead_id: lead.id,
+        lead_name: lead.name,
+        phone: lead.phone,
+        project: lead.project,
+        agent_id: lead.assigned_to_id,
+        agent_name: agentName,
+        unit_no: unitNo,
+        amount: Number(amount),
+        payment_plan: paymentPlan,
+      }])
+      .select("*")
+      .single();
+    if (bookingError) throw bookingError;
+
+    const { data: updatedLead, error: updateError } = await supabase
+      .from("sales_leads")
+      .update({ status: "booked", next_follow_up: null })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (updateError) throw updateError;
+
+    const { data: note, error: noteError } = await supabase
+      .from("sales_notes")
+      .insert([{ lead_id: id, type: "status_change", text: `Converted to booking — unit ${unitNo}, ₹${amount}.`, author: author || "Admin" }])
+      .select("*")
+      .single();
+    if (noteError) throw noteError;
+
+    res.status(201).json({ success: true, data: { lead: updatedLead, booking, note } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Bookings ─────────────────────────────────────────────────────────────
+
+// GET /api/sales/bookings
+export const getBookings = async (req, res, next) => {
+  try {
+    const { data, error } = await supabase.from("sales_bookings").select("*").order("booked_at", { ascending: false });
+    if (error) throw error;
+    res.status(200).json({ success: true, count: data.length, data });
+  } catch (err) {
+    next(err);
+  }
+};
