@@ -7,33 +7,13 @@ import { ADMIN_ROLE, canCreateRole, getRequiredManagerRole, wouldCreateCycle } f
 // admin_users stays "admin data only". The two tables share the same login
 // endpoint (see auth.controller.js), so nothing about how a user logs in or
 // how permissions are enforced in the Flutter app changes.
-const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at, contact_email, phone_number";
-
-// Every newly created (or renamed) employee is also mirrored into
-// sales_team_members so they immediately show up in the Sales module's team
-// roster without being re-entered there. This is a best-effort side effect —
-// it never fails the employee create/update/delete request itself.
-const _mirrorTeamMemberInsert = async ({ name, roleTitle, email }) => {
-  const { error } = await supabase.from("sales_team_members").insert([{
-    name,
-    role_title: roleTitle,
-    email,
-    commission_rate: 1.0,
-    target: 0,
-  }]);
-  
-  if (error) console.error("sales_team_members mirror insert failed:", error.message);
-};
-
-const _mirrorTeamMemberRoleUpdate = async (email, roleTitle) => {
-  const { error } = await supabase.from("sales_team_members").update({ role_title: roleTitle }).eq("email", email);
-  if (error) console.error("sales_team_members mirror update failed:", error.message);
-};
-
-const _mirrorTeamMemberDelete = async (email) => {
-  const { error } = await supabase.from("sales_team_members").delete().eq("email", email);
-  if (error) console.error("sales_team_members mirror delete failed:", error.message);
-};
+//
+// employee_accounts is also the Sales module's team-member table now —
+// sales.controller.js reads/writes the same rows directly (aliasing
+// phone_number → phone and created_at → joined_at to match its existing
+// response shape) instead of a separate sales_team_members table, so there
+// is nothing left to mirror here on create/update/delete.
+const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at, contact_email, phone_number, admin_user_id";
 
 // Resolves whether the caller (from the JWT) is the super admin (admin_users)
 // or a staff login (employee_accounts) — the two tables that together make
@@ -47,6 +27,19 @@ const _resolveCaller = async (callerId) => {
   if (employee) return { id: employee.id, isEmployee: true, role: employee.role_title };
 
   return null;
+};
+
+// Every employee_accounts row records which super-admin account it belongs
+// under (admin_user_id) — this app only ever has one, so this always
+// resolves to that single admin_users row regardless of whether the actual
+// caller creating the employee is the admin themselves or another employee
+// further down the hierarchy (e.g. a Branch Manager creating a Sales
+// Manager still stamps the one super admin's id, not the Branch Manager's).
+// Exported since sales.controller.js needs the exact same resolution when
+// it creates/edits employee_accounts rows through its own team-member routes.
+export const resolveAdminUserId = async () => {
+  const { data } = await supabase.from("admin_users").select("id").limit(1).maybeSingle();
+  return data?.id ?? null;
 };
 
 // Looks up a candidate manager's own role, used to confirm they hold
@@ -121,6 +114,7 @@ export const createEmployee = async (req, res, next) => {
 
     const normalizedEmail = username.toLowerCase().trim();
     const hashedPassword = await bcrypt.hash(password, 10);
+    const adminUserId = await resolveAdminUserId();
 
     const { data, error } = await supabase
       .from("employee_accounts")
@@ -134,6 +128,7 @@ export const createEmployee = async (req, res, next) => {
         reports_to_id: resolvedReportsTo,
         contact_email: contactEmail.trim(),
         phone_number: phoneNumber.trim(),
+        admin_user_id: adminUserId,
       }])
       .select(EMPLOYEE_FIELDS)
       .single();
@@ -142,8 +137,6 @@ export const createEmployee = async (req, res, next) => {
       if (error.code === "23505") return res.status(409).json({ success: false, message: "This username is already in use" });
       throw error;
     }
-
-    await _mirrorTeamMemberInsert({ name: username.trim(), roleTitle, email: normalizedEmail });
 
     res.status(201).json({ success: true, data });
   } catch (err) {
@@ -158,7 +151,7 @@ export const updateEmployee = async (req, res, next) => {
     const { roleTitle, allowedModuleIndices, password } = req.body;
 
     const { data: existing, error: fetchError } = await supabase
-      .from("employee_accounts").select("id, email, role_title, reports_to_id").eq("id", id).single();
+      .from("employee_accounts").select("id, role_title, reports_to_id").eq("id", id).single();
     if (fetchError || !existing) return res.status(404).json({ success: false, message: "Employee not found" });
 
     const updates = {};
@@ -217,8 +210,6 @@ export const updateEmployee = async (req, res, next) => {
 
     if (error) throw error;
 
-    if (roleTitle !== undefined) await _mirrorTeamMemberRoleUpdate(existing.email, roleTitle);
-
     res.status(200).json({ success: true, data });
   } catch (err) {
     next(err);
@@ -229,13 +220,11 @@ export const updateEmployee = async (req, res, next) => {
 export const deleteEmployee = async (req, res, next) => {
   try {
     const { data: existing, error: fetchError } = await supabase
-      .from("employee_accounts").select("id, email").eq("id", req.params.id).single();
+      .from("employee_accounts").select("id").eq("id", req.params.id).single();
     if (fetchError || !existing) return res.status(404).json({ success: false, message: "Employee not found" });
 
     const { error } = await supabase.from("employee_accounts").delete().eq("id", req.params.id);
     if (error) throw error;
-
-    await _mirrorTeamMemberDelete(existing.email);
 
     res.status(200).json({ success: true, message: "Employee deleted" });
   } catch (err) {
