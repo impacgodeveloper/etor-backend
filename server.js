@@ -54,6 +54,7 @@ import {
 } from "./src/controllers/employee.controller.js";
 import {
   getTeam, addTeamMember, updateTeamMember, deleteTeamMember,
+  getLeads, createLead, updateLead, deleteLead, addLeadNote, convertLeadToBooking, getBookings,
 } from "./src/controllers/sales.controller.js";
 import {
   getMyExpenses, getTeamExpenses, getAllExpenses,
@@ -233,6 +234,17 @@ app.get("/api/sales/team", authenticate, getTeam);
 app.post("/api/sales/team", authenticate, addTeamMember);
 app.put("/api/sales/team/:id", authenticate, updateTeamMember);
 app.delete("/api/sales/team/:id", authenticate, deleteTeamMember);
+
+// ============================================================
+// SALES LEAD & BOOKING ROUTES
+// ============================================================
+app.get("/api/sales/leads", authenticate, getLeads);
+app.post("/api/sales/leads", authenticate, createLead);
+app.put("/api/sales/leads/:id", authenticate, updateLead);
+app.delete("/api/sales/leads/:id", authenticate, deleteLead);
+app.post("/api/sales/leads/:id/notes", authenticate, addLeadNote);
+app.post("/api/sales/leads/:id/convert", authenticate, convertLeadToBooking);
+app.get("/api/sales/bookings", authenticate, getBookings);
 
 // ============================================================
 // ADMIN TRAVEL EXPENSE ROUTES
