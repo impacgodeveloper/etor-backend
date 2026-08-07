@@ -206,6 +206,85 @@ console.log("=================================");
   }
 };
 
+// POST /api/auth/register  (create a new super-admin + tenant schema)
+export const register = async (req, res, next) => {
+  try {
+    const { email, password, name, organization_name } = req.body;
+
+    if (!email || !password || !name || !organization_name) {
+      return res.status(400).json({
+        success: false,
+        message: "email, password, name, and organization_name are required",
+      });
+    }
+
+    // Build a safe PostgreSQL schema identifier from the org name
+    const tenant_schema = organization_name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .substring(0, 50); // schema names have a 63-char limit in PG
+
+    if (!tenant_schema) {
+      return res.status(400).json({
+        success: false,
+        message: "organization_name must contain at least one alphanumeric character",
+      });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    // The trg_create_tenant trigger fires BEFORE INSERT and creates the schema
+    const { data, error } = await supabase
+      .from("admin_users")
+      .insert({
+        email: email.toLowerCase().trim(),
+        password: hashed,
+        name: name.trim(),
+        tenant_schema,
+        role: "super_admin",
+        is_employee: false,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      // Unique violation: 23505
+      if (error.code === "23505" || (error.message && error.message.includes("unique"))) {
+        const isEmail = error.message && error.message.toLowerCase().includes("email");
+        return res.status(409).json({
+          success: false,
+          message: isEmail
+            ? "An account with this email already exists"
+            : "An organization with this name already exists",
+        });
+      }
+      throw error;
+    }
+
+    const token = jwt.sign(
+      {
+        id: data.id,
+        email: data.email,
+        role: data.role,
+        tenant_schema: data.tenant_schema,
+        is_employee: false,
+        allowed_modules: data.allowed_modules,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
+    );
+
+    res.status(201).json({
+      success: true,
+      data: { token, user: _toUserResponse(data, false) },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // GET /api/auth/me  (verify token + return current user)
 export const getMe = async (req, res, next) => {
   try {

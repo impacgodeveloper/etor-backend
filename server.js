@@ -390,7 +390,7 @@ import { errorHandler, notFound } from "./src/middleware/errorHandler.js";
 import { tenantDb } from "./src/utils/tenantDb.js";
 
 // ── Admin Controllers ────────────────────────────────────────
-import { login, getMe } from "./src/controllers/auth.controller.js";
+import { login, getMe, register } from "./src/controllers/auth.controller.js";
 import {
   getAllLayouts, getLayoutById, upsertLayout, updateLayout, deleteLayout,
 } from "./src/controllers/layout.controller.js";
@@ -554,6 +554,7 @@ app.get("/api/test-api-table", async (req, res) => {
 // ADMIN AUTH ROUTES
 // ============================================================
 app.post("/api/auth/login", login);
+app.post("/api/auth/register", register);
 app.get("/api/auth/me", authenticate, getMe);
 
 // ============================================================
