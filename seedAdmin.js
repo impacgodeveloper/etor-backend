@@ -3,15 +3,9 @@
 
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "./src/config/supabase.js";
 
 dotenv.config();
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
 
 const seedAdmin = async () => {
   const email = "admin@etor.com";
@@ -27,7 +21,8 @@ const seedAdmin = async () => {
       { email, password_hash, name, role: "super_admin", is_active: true },
       { onConflict: "email" }
     )
-    .select().single();
+    .select()
+    .single();
 
   if (error) {
     console.error("❌ Error:", error.message);
