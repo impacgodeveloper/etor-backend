@@ -275,7 +275,7 @@ export const register = async (req, res, next) => {
     }
 
     // Fire-and-forget notification to info@impacgo.com
-    sendSignupNotification({ name: data.name, email: data.email, organization_name, req });
+    sendSignupNotification({ name: name.trim(), email: email.toLowerCase().trim(), organization_name, req });
 
     const token = jwt.sign(
       {
