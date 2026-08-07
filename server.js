@@ -461,12 +461,36 @@ app.disable("etag");
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
 // ── CORS ─────────────────────────────────────────────────────
-// ALLOWED_ORIGINS in .env should be a comma-separated list of
-// production origins, e.g.:
-//   ALLOWED_ORIGINS=https://etor.com,https://www.etor.com
-// Any localhost/127.0.0.1 origin (any port) is always allowed,
-// since Flutter web's dev server picks a random port each run.
-app.use(cors({}));
+// ALLOWED_ORIGINS in .env: comma-separated list of allowed origins.
+// If unset (or "*"), every origin is allowed — useful during early dev.
+const _allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const _corsOptions = {
+  origin: (origin, callback) => {
+    // Non-browser / server-to-server requests have no Origin header — allow.
+    if (!origin) return callback(null, true);
+    // Wildcard or explicit match.
+    if (
+      _allowedOrigins.includes("*") ||
+      _allowedOrigins.includes(origin) ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-tenant-schema"],
+  optionsSuccessStatus: 204,
+};
+
+// Handle preflight for every route first, then apply CORS to all responses.
+app.options("*", cors(_corsOptions));
+app.use(cors(_corsOptions));
 
 
 
