@@ -39,45 +39,96 @@ export const getPartnerById = async (req, res, next) => {
 export const createPartner = async (req, res, next) => {
   try {
     const db = tenantDb(req);
-    const { name, email, phone, address, portfolio_value, profile_image_url, password } = req.body;
+
+    const {
+      name,
+      email,
+      phone,
+      address,
+      portfolio_value,
+      profile_image_url,
+      password,
+    } = req.body;
 
     if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: "name, email and password are required" });
+      return res.status(400).json({
+        success: false,
+        message: "name, email and password are required",
+      });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
     const normalizedEmail = email.toLowerCase().trim();
+    const hashedPassword = await bcrypt.hash(password, 10);
 
+    // Insert into tenant schema
     const { data, error } = await db
       .from("partners")
-      .insert([{
-        name,
-        email: normalizedEmail,
-        phone,
-        address,
-        portfolio_value: portfolio_value || 0,
-        profile_image_url,
-        password: hashedPassword,
-      }])
+      .insert([
+        {
+          name,
+          email: normalizedEmail,
+          phone,
+          address,
+          portfolio_value: portfolio_value || 0,
+          profile_image_url,
+          password: hashedPassword,
+        },
+      ])
       .select()
       .single();
 
     if (error) {
-      if (error.code === "23505") return res.status(409).json({ success: false, message: "Email already exists" });
+      console.error("Partner insert error:", error);
+
+      if (error.code === "23505") {
+        return res.status(409).json({
+          success: false,
+          message: "Email already exists",
+        });
+      }
+
       throw error;
     }
 
-    // Register email → schema mapping so partner login can find the right schema
-    await publicDb()
+    // Insert email -> tenant schema mapping into public schema
+    const { data: registryData, error: registryError } = await publicDb()
       .from("partner_registry")
-      .upsert({ email: normalizedEmail, schema_name: req.tenantSchema });
+      .upsert(
+        {
+          email: normalizedEmail,
+          schema_name: req.tenantSchema,
+        },
+        {
+          onConflict: "email",
+        }
+      )
+      .select()
+      .single();
 
-    res.status(201).json({ success: true, data });
+    if (registryError) {
+      console.error("Partner registry insert error:", registryError);
+
+      return res.status(500).json({
+        success: false,
+        message: "Partner created but registry entry failed",
+        error: registryError.message,
+        details: registryError.details,
+        hint: registryError.hint,
+      });
+    }
+
+    console.log("Partner registry inserted:", registryData);
+
+    return res.status(201).json({
+      success: true,
+      data,
+      registry: registryData,
+    });
   } catch (err) {
+    console.error("createPartner error:", err);
     next(err);
   }
 };
-
 // PUT /api/partners/:id
 export const updatePartner = async (req, res, next) => {
   try {
