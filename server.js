@@ -388,6 +388,7 @@ import multer from "multer";
 import { authenticate } from "./src/middleware/auth.js";
 import { errorHandler, notFound } from "./src/middleware/errorHandler.js";
 import { tenantDb } from "./src/utils/tenantDb.js";
+import { startTrialExpiryCron } from "./src/utils/trialExpiryCron.js";
 
 // ── Admin Controllers ────────────────────────────────────────
 import { login, getMe, register } from "./src/controllers/auth.controller.js";
@@ -763,5 +764,5 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
-
+  startTrialExpiryCron();
 });

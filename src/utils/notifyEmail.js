@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import geoip from 'geoip-lite';
 
-const mailTransporter = nodemailer.createTransport({
+export const mailTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT),
   secure: false,
