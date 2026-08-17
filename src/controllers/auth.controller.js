@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { supabase } from "../config/supabase.js";
 import { tenantDb } from "../utils/tenantDb.js";
 import { sendSignupNotification } from "../utils/notifyEmail.js";
+import { isTenantExpired, TRIAL_EXPIRED_CODE, TRIAL_EXPIRED_MESSAGE } from "../utils/subscription.js";
 
 // admin_users holds only the super-admin account(s). Staff logins created
 // via the Employees screen live in their own employee_accounts table (see
@@ -184,6 +185,15 @@ if (!isValid) {
 
 console.log("✅ Login successful");
 console.log("=================================");
+
+if (await isTenantExpired(account.tenant_schema)) {
+  return res.status(402).json({
+    success: false,
+    code: TRIAL_EXPIRED_CODE,
+    message: TRIAL_EXPIRED_MESSAGE,
+  });
+}
+
   const token = jwt.sign(
   {
     id: account.id,
