@@ -31,6 +31,18 @@ async function lookupReverseFk(client, schema, childTable, parentTable) {
   return col;
 }
 
+// node-postgres serializes a bare JS array/object as a Postgres array
+// literal or "[object Object]", not JSON text — so it must be JSON-encoded
+// ourselves before going into a json/jsonb column. Supabase-js didn't need
+// this because it sent real JSON over HTTP/PostgREST instead of wire params.
+// Dates and Buffers are left alone since pg already serializes those correctly.
+function toSqlValue(v) {
+  if (v !== null && typeof v === "object" && !(v instanceof Date) && !Buffer.isBuffer(v)) {
+    return JSON.stringify(v);
+  }
+  return v;
+}
+
 // Split a string by commas that are not inside parentheses.
 function splitTopLevel(str) {
   const parts = [];
@@ -449,13 +461,13 @@ class QueryBuilder {
     const rowPh = rows
       .map((row) => `(${keys.map(() => `$${idx++}`).join(", ")})`)
       .join(", ");
-    const values = rows.flatMap((row) => keys.map((k) => row[k]));
+    const values = rows.flatMap((row) => keys.map((k) => toSqlValue(row[k])));
 
     const result = await client.query(
       `INSERT INTO ${fullTable} (${cols}) VALUES ${rowPh} RETURNING *`,
       values
     );
-    return { data: result.rows, error: null };
+    return this._formatResult(result.rows);
   }
 
   async _execUpsert(client, fullTable) {
@@ -468,7 +480,7 @@ class QueryBuilder {
     const rowPh = rows
       .map((row) => `(${keys.map(() => `$${idx++}`).join(", ")})`)
       .join(", ");
-    const values = rows.flatMap((row) => keys.map((k) => row[k]));
+    const values = rows.flatMap((row) => keys.map((k) => toSqlValue(row[k])));
 
     const conflictTarget = this._upsertOpts?.onConflict
       ? this._upsertOpts.onConflict
@@ -486,7 +498,7 @@ class QueryBuilder {
       `RETURNING *`;
 
     const result = await client.query(sql, values);
-    return { data: result.rows, error: null };
+    return this._formatResult(result.rows);
   }
 
   async _execUpdate(client, fullTable) {
@@ -495,7 +507,7 @@ class QueryBuilder {
     if (!keys.length) return { data: [], error: null };
 
     const setClause = keys.map((k, i) => `"${k}" = $${i + 1}`).join(", ");
-    const updateVals = keys.map((k) => data[k]);
+    const updateVals = keys.map((k) => toSqlValue(data[k]));
 
     const { sql: where, values: whereVals } = this._buildWhere(keys.length + 1);
 
@@ -503,7 +515,7 @@ class QueryBuilder {
       `UPDATE ${fullTable} SET ${setClause}${where} RETURNING *`,
       [...updateVals, ...whereVals]
     );
-    return { data: result.rows, error: null };
+    return this._formatResult(result.rows);
   }
 
   async _execDelete(client, fullTable) {
@@ -512,7 +524,7 @@ class QueryBuilder {
       `DELETE FROM ${fullTable}${where} RETURNING *`,
       values
     );
-    return { data: result.rows, error: null };
+    return this._formatResult(result.rows);
   }
 }
 
