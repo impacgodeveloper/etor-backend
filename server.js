@@ -462,27 +462,10 @@ app.disable("etag");
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
 // ── CORS ─────────────────────────────────────────────────────
-// ALLOWED_ORIGINS in .env: comma-separated list of allowed origins.
-// If unset (or "*"), every origin is allowed — useful during early dev.
-const _allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
-
+// Allow every origin (reflects the request's Origin back), any method,
+// any headers.
 const _corsOptions = {
-  origin: (origin, callback) => {
-    // Non-browser / server-to-server requests have no Origin header — allow.
-    if (!origin) return callback(null, true);
-    // Wildcard or explicit match.
-    if (
-      _allowedOrigins.includes("*") ||
-      _allowedOrigins.includes(origin) ||
-      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
-    ) {
-      return callback(null, true);
-    }
-    return callback(new Error(`CORS: origin ${origin} not allowed`));
-  },
+  origin: true,
   credentials: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-tenant-schema"],
