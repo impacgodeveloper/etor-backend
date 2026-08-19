@@ -1,5 +1,4 @@
 import jwt from "jsonwebtoken";
-import { isTenantExpired, TRIAL_EXPIRED_CODE, TRIAL_EXPIRED_MESSAGE } from "../utils/subscription.js";
 
 export const authenticate = async (req, res, next) => {
   try {
@@ -21,17 +20,13 @@ export const authenticate = async (req, res, next) => {
     // Tenant Schema
     req.tenantSchema = decoded.tenant_schema;
 
-    // Blocks every screen/API call — for both the admin and any employee
-    // under them — the moment the tenant's trial lapses, regardless of how
-    // long the JWT itself has left to live.
-    if (await isTenantExpired(req.tenantSchema)) {
-      return res.status(402).json({
-        success: false,
-        code: TRIAL_EXPIRED_CODE,
-        message: TRIAL_EXPIRED_MESSAGE,
-      });
-    }
-
+    // No role's access is blocked here — admin, employee, and partner
+    // requests all go through regardless of trial/suspension state. Every
+    // app (Admin, Super Admin, Partner) instead reads is_active/trial_status
+    // from its own login/getMe response (see getTenantTrialSummary in
+    // trialManagement.js — the single shared computation every app reads)
+    // and blocks its own screens client-side. This keeps one trial gate
+    // instead of duplicating enforcement between the API and each UI.
     next();
   } catch (err) {
     return res.status(401).json({
