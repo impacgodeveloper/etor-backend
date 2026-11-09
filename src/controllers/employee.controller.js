@@ -29,7 +29,19 @@
 //   return null;
 // };
 
-// // Every employee_accounts row records which super-admin account it belongs
+// // An employee may only hand out modules they hold themselves — otherwise a
+// President without e.g. Layouts could create (or edit) a subordinate with
+// Layouts and act through that login. The owner can grant anything.
+// Returns the offending module numbers (empty when the request is allowed).
+const _modulesBeyondCaller = async (req, caller, requested) => {
+  if (!caller?.isEmployee || !Array.isArray(requested)) return [];
+  const { data: me } = await tenantDb(req)
+    .from("employee_accounts").select("allowed_modules").eq("id", caller.id).maybeSingle();
+  const mine = new Set((me?.allowed_modules ?? []).map((m) => Number(m)));
+  return requested.map((m) => Number(m)).filter((m) => !mine.has(m));
+};
+
+// Every employee_accounts row records which super-admin account it belongs
 // // under (admin_user_id) — this app only ever has one, so this always
 // // resolves to that single admin_users row regardless of whether the actual
 // // caller creating the employee is the admin themselves or another employee
@@ -232,7 +244,10 @@
 //   }
 // };
 import bcrypt from "bcryptjs";
-import { tenantDb } from "../utils/tenantDb.js";
+import { tenantDb, publicDb } from "../utils/tenantDb.js";
+import { isReservedRole, isStaffEmailTaken } from "../utils/staffIdentity.js";
+import { disconnectUser } from "../realtime/hub.js";
+import { pool } from "../config/supabase.js";
 import { ADMIN_ROLE, canCreateRole, getRequiredManagerRole, wouldCreateCycle } from "../utils/hierarchy.js";
 
 // admin_users holds ONLY the super-admin account(s). Every staff login
@@ -246,7 +261,7 @@ import { ADMIN_ROLE, canCreateRole, getRequiredManagerRole, wouldCreateCycle } f
 // phone_number → phone and created_at → joined_at to match its existing
 // response shape) instead of a separate sales_team_members table, so there
 // is nothing left to mirror here on create/update/delete.
-const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at, contact_email, phone_number, admin_user_id";
+const EMPLOYEE_FIELDS = "id, email, name, role:role_title, allowed_modules, is_active, reports_to_id, created_at, contact_email, phone_number, branch, commission_rate, target, admin_user_id";
 
 // Resolves whether the caller (from the JWT) is the super admin (admin_users)
 // or a staff login (employee_accounts) — the two tables that together make
@@ -256,7 +271,13 @@ const _resolveCaller = async (req) => {
   const db = tenantDb(req);
   const callerId = req.user.id;
 
-  const { data: admin } = await db.from("admin_users").select("id").eq("id", callerId).maybeSingle();
+  // admin_users only exists in public; scope it to the caller's own tenant.
+  const { data: admin } = await publicDb()
+    .from("admin_users")
+    .select("id")
+    .eq("id", callerId)
+    .eq("tenant_schema", req.tenantSchema)
+    .maybeSingle();
   if (admin) return { id: admin.id, isEmployee: false, role: ADMIN_ROLE };
 
   const { data: employee } = await db.from("employee_accounts").select("id, role_title").eq("id", callerId).maybeSingle();
@@ -276,8 +297,13 @@ const _resolveCaller = async (req) => {
 // NOTE: now requires req (to resolve the tenant schema) — call sites in
 // sales.controller.js need to pass req: resolveAdminUserId(req).
 export const resolveAdminUserId = async (req) => {
-  const db = tenantDb(req);
-  const { data } = await db.from("admin_users").select("id").limit(1).maybeSingle();
+  const { data } = await publicDb()
+    .from("admin_users")
+    .select("id")
+    .eq("tenant_schema", req.tenantSchema)
+    .eq("is_employee", false)
+    .limit(1)
+    .maybeSingle();
   return data?.id ?? null;
 };
 
@@ -288,6 +314,78 @@ const _findEmployeeRole = async (req, id) => {
   const db = tenantDb(req);
   const { data } = await db.from("employee_accounts").select("id, role_title").eq("id", id).maybeSingle();
   return data ?? null;
+};
+
+// The owner can manage every employee; an employee can only manage people
+// somewhere below them in the reporting chain (never themselves).
+const _canManageEmployee = async (req, caller, targetId) => {
+  if (!caller) return false;
+  if (!caller.isEmployee) return true;
+  if (caller.id === targetId) return false;
+  const { data: rows } = await tenantDb(req).from("employee_accounts").select("id, reports_to_id");
+  const byId = new Map((rows || []).map((r) => [r.id, r]));
+  const seen = new Set();
+  let current = byId.get(targetId)?.reports_to_id ?? null;
+  while (current && !seen.has(current)) {
+    if (current === caller.id) return true;
+    seen.add(current);
+    current = byId.get(current)?.reports_to_id ?? null;
+  }
+  return false;
+};
+
+export const callerCanManageEmployee = async (req, targetId) =>
+  _canManageEmployee(req, await _resolveCaller(req), targetId);
+
+// GET /api/employees/:id — profile, reporting line and activity for one employee.
+export const getEmployeeById = async (req, res, next) => {
+  try {
+    const db = tenantDb(req);
+    const { id } = req.params;
+
+    const { data: employee, error } = await db
+      .from("employee_accounts").select(EMPLOYEE_FIELDS).eq("id", id).maybeSingle();
+    if (error) throw error;
+    if (!employee) return res.status(404).json({ success: false, message: "Employee not found" });
+
+    const schema = `"${String(req.tenantSchema).replace(/"/g, '""')}"`;
+    const [{ data: people }, expenses, leads, bookings] = await Promise.all([
+      db.from("employee_accounts").select("id, name, role:role_title, is_active, reports_to_id"),
+      pool.query(
+        `SELECT count(*)::int AS submitted,
+                count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                COALESCE(sum(amount), 0)::float AS total_amount,
+                COALESCE(sum(amount) FILTER (WHERE status IN ('approved','reimbursed')), 0)::float AS approved_amount,
+                COALESCE(sum(amount) FILTER (WHERE status = 'reimbursed'), 0)::float AS reimbursed_amount
+           FROM ${schema}.travel_expenses WHERE employee_id::text = $1`, [id]),
+      pool.query(
+        `SELECT count(*)::int AS assigned,
+                count(*) FILTER (WHERE COALESCE(status,'new') NOT IN ('converted','lost','closed','booked'))::int AS open
+           FROM ${schema}.sales_leads WHERE assigned_to_id::text = $1`, [id]),
+      pool.query(
+        `SELECT count(*)::int AS count, COALESCE(sum(amount), 0)::float AS value
+           FROM ${schema}.sales_bookings WHERE agent_id::text = $1`, [id]),
+    ]);
+
+    const byId = new Map((people || []).map((p) => [p.id, p]));
+    const brief = (p) => p && { id: p.id, name: p.name, role: p.role, is_active: p.is_active };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ...employee,
+        manager: brief(byId.get(employee.reports_to_id)) || null,
+        direct_reports: (people || []).filter((p) => p.reports_to_id === id).map(brief),
+        can_manage: await _canManageEmployee(req, await _resolveCaller(req), id),
+        stats: {
+          expenses: expenses.rows[0],
+          sales: { leads_assigned: leads.rows[0].assigned, open_leads: leads.rows[0].open, bookings: bookings.rows[0].count, booking_value: bookings.rows[0].value },
+        },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 };
 
 // GET /api/employees
@@ -316,8 +414,18 @@ export const createEmployee = async (req, res, next) => {
     if (!username || !password || !roleTitle || !contactEmail || !phoneNumber) {
       return res.status(400).json({ success: false, message: "username, password, roleTitle, contactEmail and phoneNumber are required" });
     }
+    if (isReservedRole(roleTitle)) {
+      return res.status(400).json({ success: false, message: `"${roleTitle}" is a reserved role name` });
+    }
+    if (await isStaffEmailTaken(username)) {
+      return res.status(409).json({ success: false, message: "This username is already in use" });
+    }
 
     const caller = await _resolveCaller(req);
+    if (!caller) return res.status(403).json({ success: false, message: "Not allowed" });
+    if ((await _modulesBeyondCaller(req, caller, allowedModuleIndices)).length) {
+      return res.status(403).json({ success: false, message: "You can only grant modules you have access to yourself" });
+    }
     let resolvedReportsTo = reportsToId ?? null;
 
     // Strict hierarchy roles (President > Vice President > Branch Manager >
@@ -394,16 +502,57 @@ export const updateEmployee = async (req, res, next) => {
     const db = tenantDb(req);
 
     const { id } = req.params;
-    const { roleTitle, allowedModuleIndices, password } = req.body;
+    const { roleTitle, allowedModuleIndices, password, isActive } = req.body;
+    if (isActive !== undefined && typeof isActive !== "boolean") {
+      return res.status(400).json({ success: false, message: "isActive must be true or false" });
+    }
 
     const { data: existing, error: fetchError } = await db
-      .from("employee_accounts").select("id, role_title, reports_to_id").eq("id", id).single();
+      .from("employee_accounts").select("id, role_title, reports_to_id").eq("id", id).maybeSingle();
     if (fetchError || !existing) return res.status(404).json({ success: false, message: "Employee not found" });
+
+    const caller = await _resolveCaller(req);
+    if (!(await _canManageEmployee(req, caller, id))) {
+      return res.status(403).json({ success: false, message: "You can only manage employees who report to you" });
+    }
+    if ((await _modulesBeyondCaller(req, caller, allowedModuleIndices)).length) {
+      return res.status(403).json({ success: false, message: "You can only grant modules you have access to yourself" });
+    }
+    if (roleTitle !== undefined && isReservedRole(roleTitle)) {
+      return res.status(400).json({ success: false, message: `"${roleTitle}" is a reserved role name` });
+    }
 
     const updates = {};
     if (roleTitle !== undefined) updates.role_title = roleTitle;
     if (allowedModuleIndices !== undefined) updates.allowed_modules = allowedModuleIndices;
     if (password) updates.password = await bcrypt.hash(password, 10);
+    if (isActive !== undefined) updates.is_active = isActive;
+
+    // Contact and work details (the login username itself is not editable).
+    const { contactEmail, phoneNumber, branch } = req.body;
+    if (contactEmail !== undefined) {
+      const email = String(contactEmail).trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ success: false, message: "Enter a valid contact email" });
+      }
+      updates.contact_email = email;
+    }
+    if (phoneNumber !== undefined) {
+      const phone = String(phoneNumber).trim();
+      if (!/^\+?[0-9 -]{7,15}$/.test(phone)) {
+        return res.status(400).json({ success: false, message: "Enter a valid phone number" });
+      }
+      updates.phone_number = phone;
+    }
+    if (branch !== undefined) updates.branch = String(branch).trim() || null;
+    for (const [key, column, max] of [["commissionRate", "commission_rate", 100], ["target", "target", Number.MAX_SAFE_INTEGER]]) {
+      if (req.body[key] === undefined) continue;
+      const n = Number(req.body[key]);
+      if (!Number.isFinite(n) || n < 0 || n > max) {
+        return res.status(400).json({ success: false, message: `${key} must be a number between 0 and ${max === 100 ? 100 : "any amount"}` });
+      }
+      updates[column] = n;
+    }
 
     const touchesReportsTo = Object.prototype.hasOwnProperty.call(req.body, "reportsToId");
     if (touchesReportsTo) {
@@ -447,6 +596,10 @@ export const updateEmployee = async (req, res, next) => {
       }
     }
 
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to update" });
+    }
+
     const { data, error } = await db
       .from("employee_accounts")
       .update(updates)
@@ -455,6 +608,7 @@ export const updateEmployee = async (req, res, next) => {
       .single();
 
     if (error) throw error;
+    if (isActive === false || password) disconnectUser(req.tenantSchema, id);
 
     res.status(200).json({ success: true, data });
   } catch (err) {
@@ -468,11 +622,16 @@ export const deleteEmployee = async (req, res, next) => {
     const db = tenantDb(req);
 
     const { data: existing, error: fetchError } = await db
-      .from("employee_accounts").select("id").eq("id", req.params.id).single();
+      .from("employee_accounts").select("id").eq("id", req.params.id).maybeSingle();
     if (fetchError || !existing) return res.status(404).json({ success: false, message: "Employee not found" });
+
+    if (!(await _canManageEmployee(req, await _resolveCaller(req), req.params.id))) {
+      return res.status(403).json({ success: false, message: "You can only manage employees who report to you" });
+    }
 
     const { error } = await db.from("employee_accounts").delete().eq("id", req.params.id);
     if (error) throw error;
+    disconnectUser(req.tenantSchema, req.params.id);
 
     res.status(200).json({ success: true, message: "Employee deleted" });
   } catch (err) {

@@ -181,6 +181,7 @@
 //   }
 // };
 import { tenantDb } from "../utils/tenantDb.js";
+import { partnerInTenant, plotInTenant, unknownPartner } from "../utils/tenantRefs.js";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -269,7 +270,7 @@ export const updatePlot = async (req, res, next) => {
   try {
     const db = tenantDb(req);
 
-    const updates = { ...req.body };
+    const { id, created_at, ...updates } = req.body || {};
     if (updates.paid_amount !== undefined && updates.total_price !== undefined) {
       updates.balance_amount = updates.total_price - updates.paid_amount;
     }
@@ -327,7 +328,7 @@ export const updatePayment = async (req, res, next) => {
     const balance = plot.total_price - paid_amount;
     let payment_status = "Not Paid";
     if (paid_amount >= plot.total_price) payment_status = "Fully Paid";
-    else if (paid_amount > 0) payment_status = "Partially Paid";
+    else if (paid_amount > 0) payment_status = "Partial";
 
     const { data, error } = await db
       .from("plots")
@@ -352,13 +353,28 @@ export const assignPlotsToUser = async (req, res, next) => {
     if (!user_id || !Array.isArray(plot_ids) || plot_ids.length === 0) {
       return res.status(400).json({ success: false, message: "user_id and plot_ids[] are required" });
     }
+    if (!(await partnerInTenant(req, user_id))) return unknownPartner(res);
 
-    const { data, error } = await db
+    const { data: partner } = await db.from("partners").select("name").eq("id", user_id).maybeSingle();
+
+    // Record the partner as the owner of the plots.
+    const { error: assignErr } = await db
       .from("plots")
-      .update({ assigned_user_id: user_id })
-      .in("id", plot_ids)
-      .select();
+      .update({ assigned_user_id: user_id, owner_name: partner?.name ?? null })
+      .in("id", plot_ids);
+    if (assignErr) throw assignErr;
 
+    // A plot handed to a partner is no longer for sale — an "Available" plot
+    // or "Reserved" plot becomes "Sold" (Hold is left for the admin to resolve), so the
+    // inventory counts and the Plots screen stop offering it to other buyers.
+    const { error: statusErr } = await db
+      .from("plots")
+      .update({ status: "Sold" })
+      .in("id", plot_ids)
+      .in("status", ["Available", "Reserved"]);
+    if (statusErr) throw statusErr;
+
+    const { data, error } = await db.from("plots").select("*").in("id", plot_ids);
     if (error) throw error;
     res.status(200).json({ success: true, count: data.length, data });
   } catch (err) {

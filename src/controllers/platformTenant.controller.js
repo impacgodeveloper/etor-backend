@@ -20,6 +20,13 @@ const PUBLIC_FIELDS =
   "id, email, name, organization_name, tenant_schema, is_active, is_employee, created_at, " +
   "trial_started_at, trial_ends_at, is_subscribed, subscription_plan, trial_extension_count, upgraded_at";
 
+// Mutations return the full admin_users row; never send the password hash out.
+const withTrialStatus = async (row) => {
+  const { password, ...safe } = row;
+  const { status, daysLeft } = computeTrialStatus(safe, await getNotificationSettings());
+  return { ...safe, trial_status: status, days_left: daysLeft };
+};
+
 // GET /api/platform/tenants
 export const listTenants = async (req, res, next) => {
   try {
@@ -50,6 +57,7 @@ export const getTenant = async (req, res, next) => {
       .from("admin_users")
       .select(PUBLIC_FIELDS)
       .eq("id", req.params.id)
+      .eq("is_employee", false)
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ success: false, message: "Tenant not found" });
@@ -96,11 +104,7 @@ export const createTenant = async (req, res, next) => {
       req,
     });
 
-    const { status, daysLeft } = computeTrialStatus(tenant);
-    res.status(201).json({
-      success: true,
-      data: { ...tenant, trial_status: status, days_left: daysLeft },
-    });
+    res.status(201).json({ success: true, data: await withTrialStatus(tenant) });
   } catch (err) {
     if (err instanceof TenantProvisioningError) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
@@ -114,8 +118,7 @@ export const extendTenantTrial = async (req, res, next) => {
   try {
     const days = Number.isFinite(req.body?.days) ? Math.max(1, Math.floor(req.body.days)) : TRIAL_TOTAL_DAYS;
     const updated = await extendTrial(req.params.id, days, req.platformAdmin, req.body?.note);
-    const { status, daysLeft } = computeTrialStatus(updated);
-    res.status(200).json({ success: true, data: { ...updated, trial_status: status, days_left: daysLeft } });
+    res.status(200).json({ success: true, data: await withTrialStatus(updated) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     next(err);
@@ -126,8 +129,7 @@ export const extendTenantTrial = async (req, res, next) => {
 export const renewTenantSubscription = async (req, res, next) => {
   try {
     const updated = await renewTenant(req.params.id, req.platformAdmin, req.body?.note);
-    const { status, daysLeft } = computeTrialStatus(updated);
-    res.status(200).json({ success: true, data: { ...updated, trial_status: status, days_left: daysLeft } });
+    res.status(200).json({ success: true, data: await withTrialStatus(updated) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     next(err);
@@ -140,8 +142,7 @@ export const upgradeTenantPlan = async (req, res, next) => {
     const { plan, note } = req.body || {};
     if (!plan) return res.status(400).json({ success: false, message: "plan is required" });
     const updated = await upgradeTenant(req.params.id, plan, req.platformAdmin, note);
-    const { status, daysLeft } = computeTrialStatus(updated);
-    res.status(200).json({ success: true, data: { ...updated, trial_status: status, days_left: daysLeft } });
+    res.status(200).json({ success: true, data: await withTrialStatus(updated) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     next(err);
@@ -158,8 +159,7 @@ export const setTenantActiveStatus = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "is_active must be true or false" });
     }
     const updated = await setTenantActive(req.params.id, is_active, req.platformAdmin, req.body?.note);
-    const { status, daysLeft } = computeTrialStatus(updated);
-    res.status(200).json({ success: true, data: { ...updated, trial_status: status, days_left: daysLeft } });
+    res.status(200).json({ success: true, data: await withTrialStatus(updated) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     next(err);

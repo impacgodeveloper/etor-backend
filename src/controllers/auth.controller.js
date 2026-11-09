@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { supabase } from "../config/supabase.js";
+import { supabase, pool } from "../config/supabase.js";
 import { tenantDb } from "../utils/tenantDb.js";
 import { sendSignupNotification } from "../utils/notifyEmail.js";
 import { createTenantAdmin, TenantProvisioningError } from "../utils/tenantProvisioning.js";
@@ -9,127 +9,67 @@ import { getTenantTrialSummary } from "../utils/trialManagement.js";
 // admin_users holds only the super-admin account(s). Staff logins created
 // via the Employees screen live in their own employee_accounts table (see
 // employee.controller.js) — this keeps admin_users "admin data only" while
-//still giving every role the exact same login endpoint/JWT/session shape.
-// const _findAccount = async (email) => {
-//   const { data: admin, error: error} = await supabase
-//     .from("admin_users")
-//     .select("*")
-//     .eq("email", email)
-//     .eq("is_active", true)
-//     .maybeSingle();
-//   if (admin) return { account: admin, isEmployee: false };
+// still giving every role the exact same login endpoint/JWT/session shape.
 
+const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
 
-// console.log("Admin Query Data:", admin);
-// console.log("Admin Query Error:", error);
+// Every account a login identifier could mean, in priority order: the tenant
+// owner with that email, then employees whose login username matches, then
+// employees whose contact email matches (people naturally type their email).
+const _findLoginCandidates = async (identifier) => {
+  const id = identifier.toLowerCase().trim();
+  const candidates = [];
 
-//   // const { data: employee } = await supabase
-//   //   .from("employee_accounts")
-//   //   .select("*")
-//   //   .eq("email", email)
-//   //   .eq("is_active", true)
-//   //   .maybeSingle();
-//   // if (employee) return { account: employee, isEmployee: true };
+  const owner = await pool.query("SELECT * FROM public.admin_users WHERE lower(email) = $1 LIMIT 1", [id]);
+  if (owner.rows[0]) candidates.push({ account: owner.rows[0], isEmployee: false });
 
-//   // return null;
-//   try {
-//   const db = supabase.schema(req.tenantSchema); // or any tenant schema string
-
-//   const { data: employee, error } = await db
-//     .from("employee_accounts")
-//     .select("*")
-//     .eq("email", email)
-//     .eq("is_active", true)
-//     .maybeSingle();
-
-//   if (error) {
-//     console.error("Employee query error:", error);
-//     return null;
-//   }
-
-//   if (employee) {
-//     return {
-//       account: employee,
-//       isEmployee: true,
-//     };
-//   }
-
-//   return null;
-// } catch (err) {
-//   console.error("Employee lookup exception:", err);
-//   return null;
-// }
-// };
-const _findAccount = async (email) => {
-  // Check global admin first. Deliberately no .eq("is_active", true) here —
-  // a suspended (or trial-expired) tenant admin can still log in; the
-  // Dashboard shows a popup instead of the API blocking access. Employee
-  // accounts below keep their own is_active check — that's an individual
-  // staff member being deactivated by their own admin, a separate concept
-  // from the whole tenant being suspended by the Super Admin.
-  const { data: admin } = await supabase
-    .from("admin_users")
-    .select("*")
-    .eq("email", email)
-    .maybeSingle();
-
-  if (admin) {
-    return {
-      account: admin,
-      isEmployee: false,
-    };
-  }
-
-  // Get all tenant schemas
-  const { data: tenants, error } = await supabase
-    .from("admin_users")
-    .select("tenant_schema")
-    .not("tenant_schema", "is", null);
-
-  if (error) {
-    console.error(error);
-    return null;
-  }
-
-  // Search every tenant
-  for (const tenant of tenants) {
-    try {
-      const db = supabase.schema(tenant.tenant_schema);
-
-      const { data: employee, error } = await db
-        .from("employee_accounts")
-        .select("*")
-        .eq("email", email)
-        .eq("is_active", true)
-        .maybeSingle();
-
-      if (error) {
-        console.error(`Error in schema ${tenant.tenant_schema}:`, error);
-        continue;
-      }
-
-      if (employee) {
-        employee.tenant_schema = tenant.tenant_schema;
-
-        return {
-          account: employee,
-          isEmployee: true,
-        };
-      }
-    } catch (err) {
-      console.error(`Schema ${tenant.tenant_schema} failed:`, err);
+  const { rows: schemas } = await pool.query(
+    `SELECT DISTINCT a.tenant_schema AS s
+       FROM public.admin_users a
+       JOIN information_schema.tables t
+         ON t.table_schema = a.tenant_schema AND t.table_name = 'employee_accounts'
+      WHERE a.tenant_schema IS NOT NULL`
+  );
+  if (schemas.length) {
+    const union = schemas
+      .map(({ s }) =>
+        `SELECT e.*, '${String(s).replace(/'/g, "''")}' AS tenant_schema_found,
+                (lower(e.email) = $1) AS by_username
+           FROM ${quoteIdent(s)}.employee_accounts e
+          WHERE lower(e.email) = $1 OR lower(e.contact_email) = $1`)
+      .join(" UNION ALL ");
+    const { rows } = await pool.query(`SELECT * FROM (${union}) x ORDER BY by_username DESC`, [id]);
+    for (const row of rows) {
+      const { tenant_schema_found, by_username, ...employee } = row;
+      candidates.push({ account: { ...employee, tenant_schema: tenant_schema_found }, isEmployee: true });
     }
   }
-
-  return null;
+  return candidates;
 };
 
 // trialInfo ({is_active, trial_status, days_left}) is the ORG's state —
 // same for the admin and every employee under them — so the Dashboard can
 // show its "trial expired"/"suspended" popup without the API ever needing
 // to block the request itself. See getTenantTrialSummary in trialManagement.js.
-const _toUserResponse = (account, isEmployee, trialInfo) => ({
+// The organization the account belongs to (the tenant owner's
+// organization_name) — employees have no such column of their own.
+const _organizationName = async (account, isEmployee) => {
+  if (!isEmployee && account.organization_name) return account.organization_name;
+  if (!account.tenant_schema) return null;
+  const { data } = await supabase
+    .from("admin_users")
+    .select("organization_name")
+    .eq("tenant_schema", account.tenant_schema)
+    .eq("is_employee", false)
+    .not("organization_name", "is", null)
+    .limit(1)
+    .maybeSingle();
+  return data?.organization_name ?? null;
+};
+
+const _toUserResponse = (account, isEmployee, trialInfo, organizationName = null) => ({
   id: account.id,
+  organization_name: organizationName,
   email: account.email,
   name: account.name,
   role: isEmployee ? account.role_title : account.role,
@@ -165,38 +105,28 @@ export const login = async (req, res, next) => {
     // if (!isValid) {
     //   return res.status(401).json({ success: false, message: "Invalid email or password" });
     // }
-const found = await _findAccount(email.toLowerCase().trim());
-
-console.log("=================================");
-console.log("Login email:", email);
-console.log("Found account:", found);
-
+// The identifier can be an owner email, an employee username or an employee's
+// contact email; the password decides between accounts sharing an identifier.
+let found = null;
+for (const candidate of await _findLoginCandidates(email)) {
+  if (candidate.account.password && (await bcrypt.compare(password, candidate.account.password))) {
+    found = candidate;
+    break;
+  }
+}
 if (!found) {
-  console.log("❌ User not found");
-  return res.status(401).json({
-    success: false,
-    message: "Invalid email or password",
-  });
+  return res.status(401).json({ success: false, message: "Invalid email or password" });
 }
 
 const { account, isEmployee } = found;
-
-console.log("Stored hash:", account.password);
-
-const isValid = await bcrypt.compare(password, account.password);
-
-console.log("Password valid:", isValid);
-
-if (!isValid) {
-  console.log("❌ Password mismatch");
-  return res.status(401).json({
+// Told only after the password checks out, so it doesn't reveal which accounts exist.
+if (isEmployee && account.is_active === false) {
+  return res.status(403).json({
     success: false,
-    message: "Invalid email or password",
+    code: "ACCOUNT_DEACTIVATED",
+    message: "Your login has been deactivated. Contact your administrator.",
   });
 }
-
-console.log("✅ Login successful");
-console.log("=================================");
 
 // No trial/suspension check here — login always succeeds once credentials
 // are valid. trialInfo below is only for the Dashboard's popup.
@@ -218,7 +148,7 @@ const trialInfo = await getTenantTrialSummary(account.tenant_schema, isEmployee 
 );
     res.status(200).json({
       success: true,
-      data: { token, user: _toUserResponse(account, isEmployee, trialInfo) },
+      data: { token, user: _toUserResponse(account, isEmployee, trialInfo, await _organizationName(account, isEmployee)) },
     });
   } catch (err) {
     next(err);
@@ -226,9 +156,31 @@ const trialInfo = await getTenantTrialSummary(account.tenant_schema, isEmployee 
 };
 
 // GET /api/auth/me  (verify token + return current user)
+// Look the caller up by id inside their own tenant — never by email, which
+// could match an account in a different organization.
+const _findAccountForToken = async (user) => {
+  if (user.is_employee) {
+    const { data } = await supabase
+      .schema(user.tenant_schema)
+      .from("employee_accounts")
+      .select("*")
+      .eq("id", user.id)
+      .eq("is_active", true)
+      .maybeSingle();
+    return data ? { account: { ...data, tenant_schema: user.tenant_schema }, isEmployee: true } : null;
+  }
+  const { data } = await supabase
+    .from("admin_users")
+    .select("*")
+    .eq("id", user.id)
+    .eq("tenant_schema", user.tenant_schema)
+    .maybeSingle();
+  return data ? { account: data, isEmployee: false } : null;
+};
+
 export const getMe = async (req, res, next) => {
   try {
-    const found = await _findAccount(req.user.email.toLowerCase().trim());
+    const found = await _findAccountForToken(req.user);
     if (!found) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
@@ -236,7 +188,7 @@ export const getMe = async (req, res, next) => {
       found.account.tenant_schema,
       found.isEmployee ? null : found.account
     );
-    res.status(200).json({ success: true, data: _toUserResponse(found.account, found.isEmployee, trialInfo) });
+    res.status(200).json({ success: true, data: _toUserResponse(found.account, found.isEmployee, trialInfo, await _organizationName(found.account, found.isEmployee)) });
   } catch (err) {
     next(err);
   }
@@ -277,7 +229,7 @@ export const register = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      data: { token, user: _toUserResponse(data, false, trialInfo) },
+      data: { token, user: _toUserResponse(data, false, trialInfo, data?.organization_name ?? null) },
     });
   } catch (err) {
     next(err);

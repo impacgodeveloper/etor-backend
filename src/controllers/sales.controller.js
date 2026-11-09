@@ -406,8 +406,10 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { tenantDb } from "../utils/tenantDb.js";
 import { wouldCreateCycle } from "../utils/hierarchy.js";
-import { resolveAdminUserId } from "./employee.controller.js";
+import { resolveAdminUserId, callerCanManageEmployee } from "./employee.controller.js";
 import { saveFile } from "../utils/localStorage.js";
+import { isReservedRole, isStaffEmailTaken } from "../utils/staffIdentity.js";
+import { disconnectUser } from "../realtime/hub.js";
 
 // The Sales module's "team" is employee_accounts — there is no separate
 // sales_team_members table anymore (it held the exact same people as
@@ -453,8 +455,14 @@ export const addTeamMember = async (req, res, next) => {
     if (!name || !roleTitle) {
       return res.status(400).json({ success: false, message: "name and roleTitle are required" });
     }
+    if (isReservedRole(roleTitle)) {
+      return res.status(400).json({ success: false, message: `"${roleTitle}" is a reserved role name` });
+    }
 
     const normalizedEmail = (email && email.trim() ? email : `${crypto.randomUUID()}@team.placeholder.local`).toLowerCase().trim();
+    if (await isStaffEmailTaken(normalizedEmail)) {
+      return res.status(409).json({ success: false, message: "This email is already in use" });
+    }
     const generatedPassword = crypto.randomBytes(16).toString("hex");
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
     const adminUserId = await resolveAdminUserId(req);
@@ -494,6 +502,10 @@ export const updateTeamMember = async (req, res, next) => {
 
     const { id } = req.params;
     const { target, commissionRate, reportsToId } = req.body;
+
+    if (!(await callerCanManageEmployee(req, id))) {
+      return res.status(403).json({ success: false, message: "You can only manage team members who report to you" });
+    }
 
     const updates = {};
     if (target !== undefined) updates.target = target;
@@ -540,9 +552,13 @@ export const deleteTeamMember = async (req, res, next) => {
       .from("employee_accounts").select("id").eq("id", req.params.id).maybeSingle();
     if (fetchError) throw fetchError;
     if (!existing) return res.status(404).json({ success: false, message: "Team member not found" });
+    if (!(await callerCanManageEmployee(req, req.params.id))) {
+      return res.status(403).json({ success: false, message: "You can only manage team members who report to you" });
+    }
 
     const { error } = await db.from("employee_accounts").delete().eq("id", req.params.id);
     if (error) throw error;
+    disconnectUser(req.tenantSchema, req.params.id);
     res.status(200).json({ success: true, message: "Team member deleted" });
   } catch (err) {
     next(err);
@@ -666,8 +682,7 @@ export const uploadLeadDocument = async (req, res, next) => {
     if (fetchError) throw fetchError;
     if (!existing) return res.status(404).json({ success: false, message: "Lead not found" });
 
-    const filename = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-    const documentUrl = await saveFile(req.file.buffer, "leads", filename);
+    const documentUrl = await saveFile(req.file.buffer, req.tenantSchema, "leads", req.file.originalname);
 
     const { data, error } = await db
       .from("sales_leads")

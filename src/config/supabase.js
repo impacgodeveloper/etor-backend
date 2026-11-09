@@ -10,6 +10,10 @@ if (!process.env.DATABASE_URL) {
 
 const { Pool } = pg;
 
+// Keep DATE columns as 'YYYY-MM-DD'; parsing them into JS Dates shifts them
+// through the server's timezone and can move the day.
+pg.types.setTypeParser(pg.types.builtins.DATE, (value) => value);
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,

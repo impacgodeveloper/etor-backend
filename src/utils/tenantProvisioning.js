@@ -14,6 +14,7 @@
 // them by hand.
 import bcrypt from "bcryptjs";
 import { supabase } from "../config/supabase.js";
+import { isStaffEmailTaken } from "./staffIdentity.js";
 
 export class TenantProvisioningError extends Error {
   constructor(message, statusCode = 400) {
@@ -43,6 +44,10 @@ export const createTenantAdmin = async ({ email, password, name, organizationNam
     throw new TenantProvisioningError(
       "organization_name must contain at least one alphanumeric character"
     );
+  }
+
+  if (await isStaffEmailTaken(email)) {
+    throw new TenantProvisioningError("An account with this email already exists", 409);
   }
 
   const hashed = await bcrypt.hash(password, 10);

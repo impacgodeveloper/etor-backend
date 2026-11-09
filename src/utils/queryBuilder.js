@@ -111,6 +111,19 @@ function parseSelect(str) {
   };
 }
 
+// The Postgres server is shared with other projects; when it is at its
+// connection limit (SQLSTATE 53300) wait briefly instead of failing the request.
+const connectWithRetry = async (pool, delays = [250, 750, 1500]) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await pool.connect();
+    } catch (err) {
+      if (err.code !== "53300" || attempt >= delays.length) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+};
+
 class QueryBuilder {
   constructor(pool, schema) {
     this._pool = pool;
@@ -357,8 +370,16 @@ class QueryBuilder {
     return this._execute().then(resolve, reject);
   }
 
+  catch(reject) {
+    return this.then(undefined, reject);
+  }
+
+  finally(onFinally) {
+    return this._execute().finally(onFinally);
+  }
+
   async _execute() {
-    const client = await this._pool.connect();
+    const client = await connectWithRetry(this._pool);
     try {
       // Set schema search path for this connection so unqualified names resolve correctly.
       await client.query(`SET search_path TO "${this._schema}", public`);

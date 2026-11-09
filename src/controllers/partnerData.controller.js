@@ -521,6 +521,17 @@
 //   return "I'm connecting you with a Senior Success Manager. Estimated wait time: 45 seconds. In the meantime, you can browse our Help Center.";
 // }
 import { tenantDb } from "../utils/tenantDb.js";
+import { pool } from "../config/supabase.js";
+
+// A cancelled request must not leave a "New … Request" notification behind
+// for the admin to act on. dataKey is a fixed literal ("visit_id"/"transfer_id").
+const removeRequestNotification = async (req, dataKey, requestId) => {
+  const schema = `"${String(req.tenantSchema).replace(/"/g, '""')}"`;
+  await pool.query(
+    `DELETE FROM ${schema}.admin_notifications WHERE partner_id::text = $1 AND data->>'${dataKey}' = $2`,
+    [String(req.user.id), String(requestId)]
+  );
+};
 
 // ── DFMS helpers ─────────────────────────────────────────────────────────────
 const _dfmsBase  = () => process.env.DFMS_API_URL    || "https://dfms.impacgo.com";
@@ -622,7 +633,7 @@ export const getMyPlotById = async (req, res, next) => {
       .select("*")
       .eq("id", req.params.id)
       .eq("assigned_user_id", req.user.id)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!data) return res.status(404).json({ success: false, message: "Plot not found" });
@@ -736,9 +747,10 @@ export const markNotificationRead = async (req, res, next) => {
       .eq("id", req.params.id)
       .eq("partner_id", req.user.id)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, message: "Notification not found" });
     res.status(200).json({ success: true, data });
   } catch (err) {
     next(err);
@@ -923,6 +935,26 @@ export const requestOwnershipTransfer = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "asset_type is required" });
     }
 
+    // A specific asset, when given, must belong to the requesting partner.
+    if (asset_id) {
+      const kind = String(asset_type).toLowerCase();
+      let owned = false;
+      if (kind.includes("plot")) {
+        const { data: plot } = await db.from("plots").select("id")
+          .eq("id", asset_id).eq("assigned_user_id", req.user.id).maybeSingle();
+        owned = !!plot;
+      } else if (kind.includes("cow") || kind.includes("cattle")) {
+        const [{ data: cow }, { data: assignment }] = await Promise.all([
+          db.from("cows").select("id").eq("id", asset_id).eq("assigned_user_id", req.user.id).maybeSingle(),
+          db.from("cow_assignments").select("id").eq("cow_id", String(asset_id)).eq("customer_id", req.user.id).maybeSingle(),
+        ]);
+        owned = !!(cow || assignment);
+      }
+      if (!owned) {
+        return res.status(403).json({ success: false, message: "You can only transfer assets you own" });
+      }
+    }
+
     const { data, error } = await db
       .from("ownership_transfers")
       .insert([{
@@ -976,6 +1008,7 @@ export const cancelVisit = async (req, res, next) => {
 
     const { error } = await db.from("visit_schedules").delete().eq("id", req.params.id);
     if (error) throw error;
+    await removeRequestNotification(req, "visit_id", req.params.id);
     res.status(200).json({ success: true, message: "Visit cancelled" });
   } catch (err) {
     next(err);
@@ -997,6 +1030,7 @@ export const cancelTransfer = async (req, res, next) => {
 
     const { error } = await db.from("ownership_transfers").delete().eq("id", req.params.id);
     if (error) throw error;
+    await removeRequestNotification(req, "transfer_id", req.params.id);
     res.status(200).json({ success: true, message: "Transfer cancelled" });
   } catch (err) {
     next(err);
@@ -1009,11 +1043,12 @@ export const getMyDashboard = async (req, res, next) => {
 
     const partnerId = req.user.id;
 
-    const [plotsRes, paymentsRes, notifRes, cowCountRes] = await Promise.all([
+    const [plotsRes, paymentsRes, notifRes, cowCountRes, localCowCountRes] = await Promise.all([
       db.from("plots").select("status, total_price, paid_amount").eq("assigned_user_id", partnerId),
       db.from("payments").select("amount").eq("user_id", partnerId),
       db.from("notifications").select("id", { count: "exact", head: true }).eq("partner_id", partnerId).eq("is_read", false),
       db.from("cow_assignments").select("id", { count: "exact", head: true }).eq("customer_id", partnerId),
+      db.from("cows").select("id", { count: "exact", head: true }).eq("assigned_user_id", partnerId).neq("breed", "Camera"),
     ]);
 
     const plots = plotsRes.data || [];
@@ -1032,7 +1067,7 @@ export const getMyDashboard = async (req, res, next) => {
         active_plots: plots.length,
         total_returns: totalRevenue,
         unread_notifications: notifRes.count || 0,
-        cattle_owned: cowCountRes.count || 0,
+        cattle_owned: (cowCountRes.count || 0) + (localCowCountRes.count || 0),
         portfolio_growth_percent: growthPercent,
       },
     });

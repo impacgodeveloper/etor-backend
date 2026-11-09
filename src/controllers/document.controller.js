@@ -1,4 +1,5 @@
 import { tenantDb } from "../utils/tenantDb.js";
+import { partnerInTenant, plotInTenant, unknownPartner } from "../utils/tenantRefs.js";
 import { saveFile, deleteLocalFile } from "../utils/localStorage.js";
 
 // GET /api/documents?related_user_id=xxx
@@ -45,9 +46,9 @@ export const uploadDocument = async (req, res, next) => {
     if (!req.file) {
       return res.status(400).json({ success: false, message: "file is required" });
     }
+    if (related_user_id && !(await partnerInTenant(req, related_user_id))) return unknownPartner(res);
 
-    const filename = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-    const fileUrl = await saveFile(req.file.buffer, "documents", filename);
+    const fileUrl = await saveFile(req.file.buffer, req.tenantSchema, "documents", req.file.originalname);
 
     const { data, error } = await db
       .from("documents")
@@ -77,7 +78,7 @@ export const deleteDocument = async (req, res, next) => {
       .from("documents").select("file_url").eq("id", req.params.id).single();
     if (fetchError) throw fetchError;
 
-    await deleteLocalFile(doc?.file_url);
+    await deleteLocalFile(doc?.file_url, req.tenantSchema);
 
     const { error } = await db.from("documents").delete().eq("id", req.params.id);
     if (error) throw error;

@@ -147,6 +147,7 @@ const getTenantOrThrow = async (adminUserId) => {
     .from("admin_users")
     .select("*")
     .eq("id", adminUserId)
+    .eq("is_employee", false)
     .maybeSingle();
   if (error) throw error;
   if (!data) {
@@ -188,7 +189,7 @@ export const extendTrial = async (adminUserId, extraDays = TRIAL_TOTAL_DAYS, per
   await recordNotification({
     adminUserId,
     notifType: "trial_extended",
-    message: `Trial extended by ${extraDays} day(s), now ending ${newEndsAt}.`,
+    message: `Trial extended by ${extraDays} day(s), now ending ${new Date(newEndsAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })}.`,
   });
 
   return data;

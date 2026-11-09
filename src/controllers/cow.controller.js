@@ -220,6 +220,7 @@
 //   }
 // };
 import { tenantDb } from "../utils/tenantDb.js";
+import { partnerInTenant, unknownPartner } from "../utils/tenantRefs.js";
 
 const FARM_API = process.env.FARM_API_URL || "https://dfms.impacgo.com";
 
@@ -311,6 +312,7 @@ export const assignCowsToCustomer = async (req, res, next) => {
     if (!customer_id || !Array.isArray(cow_ids) || cow_ids.length === 0) {
       return res.status(400).json({ success: false, message: "customer_id and cow_ids[] are required" });
     }
+    if (!(await partnerInTenant(req, customer_id))) return unknownPartner(res);
 
     const rows = cow_ids.map((cow_id) => ({ customer_id, cow_id }));
     const { data, error } = await db
@@ -330,7 +332,9 @@ export const unassignCow = async (req, res, next) => {
   try {
     const db = tenantDb(req);
 
-    const { customer_id, cow_id } = req.body;
+    // DELETE requests often carry no body, so accept query params too.
+    const customer_id = req.body?.customer_id ?? req.query.customer_id;
+    const cow_id = req.body?.cow_id ?? req.query.cow_id;
     if (!customer_id || !cow_id) {
       return res.status(400).json({ success: false, message: "customer_id and cow_id are required" });
     }
@@ -392,6 +396,7 @@ export const createCow = async (req, res, next) => {
     const db = tenantDb(req);
 
     const { tag_number, breed, live_feed_url, assigned_user_id, health_status, status } = req.body;
+    if (assigned_user_id && !(await partnerInTenant(req, assigned_user_id))) return unknownPartner(res);
 
     const { data, error } = await db
       .from("cows")

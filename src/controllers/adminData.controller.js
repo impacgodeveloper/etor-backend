@@ -308,6 +308,7 @@
 //   return date.toLocaleDateString("en-IN", { month: "short", day: "numeric" });
 // }
 import { tenantDb } from "../utils/tenantDb.js";
+import { partnerInTenant, plotInTenant, unknownPartner } from "../utils/tenantRefs.js";
 
 // ============================================================
 // ADMIN NOTIFICATIONS
@@ -440,7 +441,7 @@ export const updateAdminVisitRequest = async (req, res, next) => {
       ? `Your ${visit.visit_type} request could not be accommodated. ${admin_note ? `Note: ${admin_note}` : "Please reschedule."}`
       : `Your visit request status has been updated to: ${status}`;
 
-    db.from("notifications").insert([{
+    await db.from("notifications").insert([{
       partner_id: visit.partner_id,
       title: notifTitle,
       message: notifMsg,
@@ -498,7 +499,7 @@ export const updateAdminTransferRequest = async (req, res, next) => {
 
     const { data: transfer, error } = await db
       .from("ownership_transfers")
-      .update({ status, ...(admin_note ? { admin_note } : {}) })
+      .update({ status, ...(admin_note ? { admin_note } : {}), ...(status === "pending" ? { resolved_at: null } : { resolved_at: new Date().toISOString() }) })
       .eq("id", req.params.id)
       .select("*, partners:from_partner_id(name)")
       .single();
@@ -508,7 +509,7 @@ export const updateAdminTransferRequest = async (req, res, next) => {
       ? `Your ownership transfer request for ${transfer.asset_type} has been approved!`
       : `Your ownership transfer request status: ${status}. ${admin_note ? `Note: ${admin_note}` : ""}`;
 
-    db.from("notifications").insert([{
+    await db.from("notifications").insert([{
       partner_id: transfer.from_partner_id,
       title: status === "approved" ? "Transfer Approved!" : "Transfer Request Update",
       message: notifMsg,
@@ -593,6 +594,7 @@ export const replyToSupportMessage = async (req, res, next) => {
     if (!message?.trim()) {
       return res.status(400).json({ success: false, message: "Message is required" });
     }
+    if (!(await partnerInTenant(req, req.params.partnerId))) return unknownPartner(res);
 
     const { data, error } = await db
       .from("support_messages")
@@ -608,7 +610,7 @@ export const replyToSupportMessage = async (req, res, next) => {
 
     // Notify partner that admin replied
     const preview = message.trim().length > 80 ? message.trim().substring(0, 80) + "…" : message.trim();
-    db.from("notifications").insert([{
+    await db.from("notifications").insert([{
       partner_id: req.params.partnerId,
       title: "New message from Admin",
       message: preview,

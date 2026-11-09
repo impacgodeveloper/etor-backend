@@ -387,11 +387,13 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 // ── Middleware ───────────────────────────────────────────────
-import { authenticate } from "./src/middleware/auth.js";
+import { authStaff, authPartner } from "./src/middleware/auth.js";
 import { authenticatePlatform } from "./src/middleware/platformAuth.js";
 import { errorHandler, notFound } from "./src/middleware/errorHandler.js";
-import { tenantDb } from "./src/utils/tenantDb.js";
+import { pool } from "./src/config/supabase.js";
 import { startTrialExpiryCron } from "./src/utils/trialExpiryCron.js";
+import { attachRealtime, connectedCount } from "./src/realtime/hub.js";
+import { realtimeEvents, startTrialDeadlineWatcher } from "./src/realtime/events.js";
 
 // ── Platform (Super Admin) Controllers ────────────────────────
 import { platformLogin, getPlatformMe } from "./src/controllers/platformAuth.controller.js";
@@ -443,7 +445,7 @@ import {
   getAdminSupportMessages, getAdminSupportThread, replyToSupportMessage,
 } from "./src/controllers/adminData.controller.js";
 import {
-  getAllEmployees, createEmployee, updateEmployee, deleteEmployee,
+  getAllEmployees, getEmployeeById, createEmployee, updateEmployee, deleteEmployee,
 } from "./src/controllers/employee.controller.js";
 import {
   getTeam, addTeamMember, updateTeamMember, deleteTeamMember,
@@ -451,7 +453,7 @@ import {
 } from "./src/controllers/sales.controller.js";
 import {
   getMyExpenses, getTeamExpenses, getAllExpenses,
-  createExpense, updateExpenseStatus, reimburseExpense, deleteExpense,
+  createExpense, updateExpense, updateExpenseStatus, reimburseExpense, deleteExpense,
 } from "./src/controllers/travelExpense.controller.js";
 
 // ── Partner Controllers ──────────────────────────────────────
@@ -518,6 +520,7 @@ app.use(cors(_corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(morgan("dev"));
+app.use(realtimeEvents);
 
 // ── Tenant resolution ────────────────────────────────────────
 // EVERY controller converted so far calls tenantDb(req), which reads
@@ -538,7 +541,15 @@ const upload = multer({
 });
 
 // Serve uploaded files (documents, avatars, receipts, leads)
-app.use("/uploads", express.static(join(__dirname, "uploads")));
+// "?download" asks the browser to save the file instead of opening it.
+app.use(
+  "/uploads",
+  (req, res, next) => {
+    if (req.query.download !== undefined) res.attachment(req.path.split("/").pop());
+    next();
+  },
+  express.static(join(__dirname, "uploads"), { dotfiles: "deny", index: false })
+);
 
 // ============================================================
 // HEALTH CHECK
@@ -547,30 +558,12 @@ app.get("/", (req, res) => res.send("Etor Backend running 🚀"));
 app.get("/api/test", (req, res) =>
   res.status(200).json({ success: true, message: "API is working 🚀" })
 );
-app.get("/api/test-supabase", async (req, res) => {
-  const db = tenantDb(req);
-  const { data, error } = await db
-    .from("partners")
-    .select("id, email, is_active")
-    .eq("email", "partner@test.com")
-    .single();
-  res.json({ data, error });
-});
-app.get("/api/test-api-table", async (req, res) => {
+app.get("/api/health", async (req, res) => {
   try {
-    const db = tenantDb(req);
-
-    const { data, error } = await db
-      .from("test_api")
-      .select("*");
-
-    res.json({ data, error });
+    await pool.query("SELECT 1");
+    res.status(200).json({ success: true, db: "ok", realtimeClients: connectedCount() });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(503).json({ success: false, db: "unreachable", message: err.message });
   }
 });
 
@@ -579,106 +572,107 @@ app.get("/api/test-api-table", async (req, res) => {
 // ============================================================
 app.post("/api/auth/register", register);
 app.post("/api/auth/login", login);
-app.post("/api/auth/register", register);
-app.get("/api/auth/me", authenticate, getMe);
+app.get("/api/auth/me", authStaff, getMe);
 
 // ============================================================
 // ADMIN LAYOUT ROUTES
 // ============================================================
-app.get("/api/layouts", authenticate, getAllLayouts);
-app.get("/api/layouts/:id", authenticate, getLayoutById);
-app.post("/api/layouts", authenticate, upsertLayout);
-app.put("/api/layouts/:id", authenticate, updateLayout);
-app.delete("/api/layouts/:id", authenticate, deleteLayout);
+app.get("/api/layouts", authStaff, getAllLayouts);
+app.get("/api/layouts/:id", authStaff, getLayoutById);
+app.post("/api/layouts", authStaff, upsertLayout);
+app.put("/api/layouts/:id", authStaff, updateLayout);
+app.delete("/api/layouts/:id", authStaff, deleteLayout);
 
 // ============================================================
 // ADMIN BLOCK ROUTES
 // ============================================================
-app.get("/api/blocks", authenticate, getAllBlocks);
-app.get("/api/blocks/:id", authenticate, getBlockById);
-app.post("/api/blocks", authenticate, upsertBlock);
-app.put("/api/blocks/:id", authenticate, updateBlock);
-app.delete("/api/blocks/:id", authenticate, deleteBlock);
+app.get("/api/blocks", authStaff, getAllBlocks);
+app.get("/api/blocks/:id", authStaff, getBlockById);
+app.post("/api/blocks", authStaff, upsertBlock);
+app.put("/api/blocks/:id", authStaff, updateBlock);
+app.delete("/api/blocks/:id", authStaff, deleteBlock);
 
 // ============================================================
 // ADMIN PLOT ROUTES
 // ============================================================
-app.get("/api/plots", authenticate, getAllPlots);
-app.post("/api/plots/assign", authenticate, assignPlotsToUser);
-app.get("/api/plots/:id", authenticate, getPlotById);
-app.post("/api/plots", authenticate, upsertPlot);
-app.put("/api/plots/:id", authenticate, updatePlot);
-app.patch("/api/plots/:id/status", authenticate, updatePlotStatus);
-app.patch("/api/plots/:id/payment", authenticate, updatePayment);
-app.delete("/api/plots/:id", authenticate, deletePlot);
+app.get("/api/plots", authStaff, getAllPlots);
+app.post("/api/plots/assign", authStaff, assignPlotsToUser);
+app.get("/api/plots/:id", authStaff, getPlotById);
+app.post("/api/plots", authStaff, upsertPlot);
+app.put("/api/plots/:id", authStaff, updatePlot);
+app.patch("/api/plots/:id/status", authStaff, updatePlotStatus);
+app.patch("/api/plots/:id/payment", authStaff, updatePayment);
+app.delete("/api/plots/:id", authStaff, deletePlot);
 
 // ============================================================
 // ADMIN PARTNER ROUTES
 // ============================================================
-app.get("/api/partners", authenticate, getAllPartners);
-app.get("/api/partners/:id", authenticate, getPartnerById);
-app.post("/api/partners", authenticate, createPartner);
-app.put("/api/partners/:id", authenticate, updatePartner);
-app.delete("/api/partners/:id", authenticate, deletePartner);
+app.get("/api/partners", authStaff, getAllPartners);
+app.get("/api/partners/:id", authStaff, getPartnerById);
+app.post("/api/partners", authStaff, createPartner);
+app.put("/api/partners/:id", authStaff, updatePartner);
+app.delete("/api/partners/:id", authStaff, deletePartner);
 
 // ============================================================
 // ADMIN DOCUMENT ROUTES
 // ============================================================
-app.get("/api/documents", authenticate, getAllDocuments);
-app.get("/api/documents/:id", authenticate, getDocumentById);
-app.post("/api/documents", authenticate, upload.single("file"), uploadDocument);
-app.delete("/api/documents/:id", authenticate, deleteDocument);
+app.get("/api/documents", authStaff, getAllDocuments);
+app.get("/api/documents/:id", authStaff, getDocumentById);
+app.post("/api/documents", authStaff, upload.single("file"), uploadDocument);
+app.delete("/api/documents/:id", authStaff, deleteDocument);
 
 // ============================================================
 // ADMIN PAYMENT ROUTES
 // ============================================================
-app.get("/api/payments", authenticate, getAllPayments);
-app.post("/api/payments", authenticate, createPayment);
-app.delete("/api/payments/:id", authenticate, deletePayment);
+app.get("/api/payments", authStaff, getAllPayments);
+app.post("/api/payments", authStaff, createPayment);
+app.delete("/api/payments/:id", authStaff, deletePayment);
 
 // ============================================================
 // ADMIN EMPLOYEE ROUTES
 // ============================================================
-app.get("/api/employees", authenticate, getAllEmployees);
-app.post("/api/employees", authenticate, createEmployee);
-app.put("/api/employees/:id", authenticate, updateEmployee);
-app.delete("/api/employees/:id", authenticate, deleteEmployee);
+app.get("/api/employees", authStaff, getAllEmployees);
+app.get("/api/employees/:id", authStaff, getEmployeeById);
+app.post("/api/employees", authStaff, createEmployee);
+app.put("/api/employees/:id", authStaff, updateEmployee);
+app.delete("/api/employees/:id", authStaff, deleteEmployee);
 
 // ============================================================
 // SALES TEAM MEMBER ROUTES
 // ============================================================
-app.get("/api/sales/team", authenticate, getTeam);
-app.post("/api/sales/team", authenticate, addTeamMember);
-app.put("/api/sales/team/:id", authenticate, updateTeamMember);
-app.delete("/api/sales/team/:id", authenticate, deleteTeamMember);
+app.get("/api/sales/team", authStaff, getTeam);
+app.post("/api/sales/team", authStaff, addTeamMember);
+app.put("/api/sales/team/:id", authStaff, updateTeamMember);
+app.delete("/api/sales/team/:id", authStaff, deleteTeamMember);
 
 // ============================================================
 // SALES LEAD & BOOKING ROUTES
 // ============================================================
-app.get("/api/sales/leads", authenticate, getLeads);
-app.post("/api/sales/leads", authenticate, createLead);
-app.put("/api/sales/leads/:id", authenticate, updateLead);
-app.delete("/api/sales/leads/:id", authenticate, deleteLead);
-app.post("/api/sales/leads/:id/notes", authenticate, addLeadNote);
-app.post("/api/sales/leads/:id/document", authenticate, upload.single("file"), uploadLeadDocument);
-app.post("/api/sales/leads/:id/convert", authenticate, convertLeadToBooking);
-app.get("/api/sales/bookings", authenticate, getBookings);
+app.get("/api/sales/leads", authStaff, getLeads);
+app.post("/api/sales/leads", authStaff, createLead);
+app.put("/api/sales/leads/:id", authStaff, updateLead);
+app.delete("/api/sales/leads/:id", authStaff, deleteLead);
+app.post("/api/sales/leads/:id/notes", authStaff, addLeadNote);
+app.post("/api/sales/leads/:id/document", authStaff, upload.single("file"), uploadLeadDocument);
+app.post("/api/sales/leads/:id/convert", authStaff, convertLeadToBooking);
+app.get("/api/sales/bookings", authStaff, getBookings);
 
 // ============================================================
 // ADMIN TRAVEL EXPENSE ROUTES
 // ============================================================
-app.get("/api/travel-expenses/mine", authenticate, getMyExpenses);
-app.get("/api/travel-expenses/team", authenticate, getTeamExpenses);
-app.get("/api/travel-expenses", authenticate, getAllExpenses);
-app.post("/api/travel-expenses", authenticate, upload.single("file"), createExpense);
-app.patch("/api/travel-expenses/:id/status", authenticate, updateExpenseStatus);
-app.patch("/api/travel-expenses/:id/reimburse", authenticate, reimburseExpense);
-app.delete("/api/travel-expenses/:id", authenticate, deleteExpense);
+app.get("/api/travel-expenses/mine", authStaff, getMyExpenses);
+app.get("/api/travel-expenses/team", authStaff, getTeamExpenses);
+app.get("/api/travel-expenses", authStaff, getAllExpenses);
+app.post("/api/travel-expenses", authStaff, upload.single("file"), createExpense);
+app.put("/api/travel-expenses/:id", authStaff, upload.single("file"), updateExpense);
+app.patch("/api/travel-expenses/:id/status", authStaff, updateExpenseStatus);
+app.patch("/api/travel-expenses/:id/reimburse", authStaff, reimburseExpense);
+app.delete("/api/travel-expenses/:id", authStaff, deleteExpense);
 
 // ============================================================
 // ADMIN COW ROUTES
 // ============================================================
-app.get("/api/cows/farms", authenticate, async (req, res) => {
+app.get("/api/cows/farms", authStaff, async (req, res) => {
   try {
     const { default: fetch } = await import("node-fetch").catch(() => ({ default: globalThis.fetch }));
     const baseUrl = process.env.DFMS_API_URL || "https://dfms.impacgo.com";
@@ -693,41 +687,41 @@ app.get("/api/cows/farms", authenticate, async (req, res) => {
     res.status(200).json({ success: true, data: [] });
   }
 });
-app.get("/api/cows", authenticate, getAllCows);
-app.post("/api/cows", authenticate, createCow);
-app.get("/api/cows/dfms/list", authenticate, getDfmsCows);
-app.get("/api/cows/farm/:farmAdminId", authenticate, getCowsForFarm);
-app.get("/api/cows/assignments", authenticate, getAllAssignments);
-app.get("/api/cows/assignments/:customerId", authenticate, getAssignmentsForCustomer);
-app.get("/api/cows/for-user/:userId", authenticate, getCowsForUser);
-app.post("/api/cows/assign", authenticate, assignCowsToCustomer);
-app.post("/api/cows/assign/remove", authenticate, unassignCow);
-app.delete("/api/cows/assign", authenticate, unassignCow);
-app.patch("/api/cows/:id/live-feed", authenticate, updateCowLiveFeed);
+app.get("/api/cows", authStaff, getAllCows);
+app.post("/api/cows", authStaff, createCow);
+app.get("/api/cows/dfms/list", authStaff, getDfmsCows);
+app.get("/api/cows/farm/:farmAdminId", authStaff, getCowsForFarm);
+app.get("/api/cows/assignments", authStaff, getAllAssignments);
+app.get("/api/cows/assignments/:customerId", authStaff, getAssignmentsForCustomer);
+app.get("/api/cows/for-user/:userId", authStaff, getCowsForUser);
+app.post("/api/cows/assign", authStaff, assignCowsToCustomer);
+app.post("/api/cows/assign/remove", authStaff, unassignCow);
+app.delete("/api/cows/assign", authStaff, unassignCow);
+app.patch("/api/cows/:id/live-feed", authStaff, updateCowLiveFeed);
 
 // ============================================================
 // ADMIN DASHBOARD
 // ============================================================
-app.get("/api/dashboard/stats", authenticate, getDashboardStats);
+app.get("/api/dashboard/stats", authStaff, getDashboardStats);
 
 // ============================================================
 // ADMIN NOTIFICATIONS + REQUESTS
 // ============================================================
 // mark-all-read MUST come before /:id/read
-app.patch("/api/admin/notifications/mark-all-read", authenticate, markAllAdminNotificationsRead);
-app.get("/api/admin/notifications/count", authenticate, getAdminNotificationCount);
-app.get("/api/admin/notifications", authenticate, getAdminNotifications);
-app.patch("/api/admin/notifications/:id/read", authenticate, markAdminNotificationRead);
+app.patch("/api/admin/notifications/mark-all-read", authStaff, markAllAdminNotificationsRead);
+app.get("/api/admin/notifications/count", authStaff, getAdminNotificationCount);
+app.get("/api/admin/notifications", authStaff, getAdminNotifications);
+app.patch("/api/admin/notifications/:id/read", authStaff, markAdminNotificationRead);
 
-app.get("/api/admin/requests/visits", authenticate, getAdminVisitRequests);
-app.patch("/api/admin/requests/visits/:id", authenticate, updateAdminVisitRequest);
+app.get("/api/admin/requests/visits", authStaff, getAdminVisitRequests);
+app.patch("/api/admin/requests/visits/:id", authStaff, updateAdminVisitRequest);
 
-app.get("/api/admin/requests/transfers", authenticate, getAdminTransferRequests);
-app.patch("/api/admin/requests/transfers/:id", authenticate, updateAdminTransferRequest);
+app.get("/api/admin/requests/transfers", authStaff, getAdminTransferRequests);
+app.patch("/api/admin/requests/transfers/:id", authStaff, updateAdminTransferRequest);
 
-app.get("/api/admin/requests/support", authenticate, getAdminSupportMessages);
-app.get("/api/admin/support/:partnerId/thread", authenticate, getAdminSupportThread);
-app.post("/api/admin/requests/support/:partnerId/reply", authenticate, replyToSupportMessage);
+app.get("/api/admin/requests/support", authStaff, getAdminSupportMessages);
+app.get("/api/admin/support/:partnerId/thread", authStaff, getAdminSupportThread);
+app.post("/api/admin/requests/support/:partnerId/reply", authStaff, replyToSupportMessage);
 
 // ============================================================
 // PLATFORM (SUPER ADMIN) ROUTES — separate JWT/role, never subject to
@@ -764,46 +758,46 @@ app.put("/api/platform/settings", authenticatePlatform, updateSettings);
 // PARTNER AUTH ROUTES (separate JWT, role: "partner")
 // ============================================================
 app.post("/api/partner-auth/login", partnerLogin);
-app.get("/api/partner-auth/me", authenticate, getPartnerMe);
-app.put("/api/partner-auth/profile", authenticate, updatePartnerProfile);
-app.post("/api/partner-auth/change-password", authenticate, changePartnerPassword);
+app.get("/api/partner-auth/me", authPartner, getPartnerMe);
+app.put("/api/partner-auth/profile", authPartner, updatePartnerProfile);
+app.post("/api/partner-auth/change-password", authPartner, changePartnerPassword);
 
 // Avatar upload/delete (NEW)
-app.post("/api/partner-auth/avatar", authenticate, upload.single("file"), uploadAvatar);
-app.delete("/api/partner-auth/avatar", authenticate, deleteAvatar);
+app.post("/api/partner-auth/avatar", authPartner, upload.single("file"), uploadAvatar);
+app.delete("/api/partner-auth/avatar", authPartner, deleteAvatar);
 
 // ============================================================
 // PARTNER DATA ROUTES (scoped to logged-in partner)
 // ============================================================
-app.get("/api/partner/dashboard", authenticate, getMyDashboard);
+app.get("/api/partner/dashboard", authPartner, getMyDashboard);
 
-app.get("/api/partner/cows", authenticate, getMyCows);
+app.get("/api/partner/cows", authPartner, getMyCows);
 
-app.get("/api/partner/plots", authenticate, getMyPlots);
-app.get("/api/partner/plots/:id", authenticate, getMyPlotById);
+app.get("/api/partner/plots", authPartner, getMyPlots);
+app.get("/api/partner/plots/:id", authPartner, getMyPlotById);
 
-app.get("/api/partner/transactions", authenticate, getMyTransactions);
-app.get("/api/partner/documents", authenticate, getMyDocuments);
-app.post("/api/partner/documents", authenticate, upload.single("file"), async (req, res, next) => {
+app.get("/api/partner/transactions", authPartner, getMyTransactions);
+app.get("/api/partner/documents", authPartner, getMyDocuments);
+app.post("/api/partner/documents", authPartner, upload.single("file"), async (req, res, next) => {
   req.body.related_user_id = req.user.id;
   return uploadDocument(req, res, next);
 });
 
 // /mark-all-read MUST come before /:id/read (more specific routes first)
-app.patch("/api/partner/notifications/mark-all-read", authenticate, markAllNotificationsRead);
-app.get("/api/partner/notifications", authenticate, getMyNotifications);
-app.patch("/api/partner/notifications/:id/read", authenticate, markNotificationRead);
+app.patch("/api/partner/notifications/mark-all-read", authPartner, markAllNotificationsRead);
+app.get("/api/partner/notifications", authPartner, getMyNotifications);
+app.patch("/api/partner/notifications/:id/read", authPartner, markNotificationRead);
 
-app.post("/api/partner/visits", authenticate, scheduleVisit);
-app.get("/api/partner/visits", authenticate, getMyVisits);
-app.delete("/api/partner/visits/:id", authenticate, cancelVisit);
+app.post("/api/partner/visits", authPartner, scheduleVisit);
+app.get("/api/partner/visits", authPartner, getMyVisits);
+app.delete("/api/partner/visits/:id", authPartner, cancelVisit);
 
-app.get("/api/partner/support", authenticate, getMySupportMessages);
-app.post("/api/partner/support", authenticate, sendSupportMessage);
+app.get("/api/partner/support", authPartner, getMySupportMessages);
+app.post("/api/partner/support", authPartner, sendSupportMessage);
 
-app.get("/api/partner/ownership-transfer", authenticate, getMyTransfers);
-app.post("/api/partner/ownership-transfer", authenticate, requestOwnershipTransfer);
-app.delete("/api/partner/ownership-transfer/:id", authenticate, cancelTransfer);
+app.get("/api/partner/ownership-transfer", authPartner, getMyTransfers);
+app.post("/api/partner/ownership-transfer", authPartner, requestOwnershipTransfer);
+app.delete("/api/partner/ownership-transfer/:id", authPartner, cancelTransfer);
 
 // ============================================================
 // ERROR HANDLERS (must be last)
@@ -815,8 +809,16 @@ app.use(errorHandler);
 // START SERVER
 // ============================================================
 
+// A single failed promise outside a request (cron, DB hiccup) must not take
+// the whole multi-tenant server down.
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
   startTrialExpiryCron();
+  startTrialDeadlineWatcher();
 });
+attachRealtime(server);

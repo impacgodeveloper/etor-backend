@@ -161,10 +161,11 @@ export const upsertBlock = async (req, res, next) => {
 export const updateBlock = async (req, res, next) => {
   try {
     const db = tenantDb(req);
+    const { id, created_at, ...updates } = req.body || {};
 
     const { data, error } = await db
       .from("blocks")
-      .update(req.body)
+      .update(updates)
       .eq("id", req.params.id)
       .select()
       .single();

@@ -1,6 +1,12 @@
 import bcrypt from "bcryptjs";
 import { tenantDb, publicDb } from "../utils/tenantDb.js";
 
+const withoutSecrets = (row) => {
+  if (!row) return row;
+  const { password, password_hash, ...safe } = row;
+  return safe;
+};
+
 // GET /api/partners
 export const getAllPartners = async (req, res, next) => {
   try {
@@ -108,38 +114,31 @@ export const createPartner = async (req, res, next) => {
       throw error;
     }
 
-    // Insert email -> tenant schema mapping into public schema
-    const { data: registryData, error: registryError } = await publicDb()
-      .from("partner_registry")
-      .upsert(
-        {
-          email: normalizedEmail,
-          schema_name: req.tenantSchema,
-        },
-        {
-          onConflict: "email",
-        }
-      )
-      .select()
-      .single();
-
-    if (registryError) {
-      console.error("Partner registry insert error:", registryError);
-
-      return res.status(500).json({
-        success: false,
-        message: "Partner created but registry entry failed",
-        error: registryError.message,
-        details: registryError.details,
-        hint: registryError.hint,
-      });
+    // Map the login email to this tenant. Insert (never upsert) so a race with
+    // another organization can't silently take over its partner's login.
+    let registryData = existingRegistry;
+    if (!existingRegistry) {
+      const { data: inserted, error: registryError } = await publicDb()
+        .from("partner_registry")
+        .insert({ email: normalizedEmail, schema_name: req.tenantSchema })
+        .select()
+        .single();
+      if (registryError) {
+        await db.from("partners").delete().eq("id", data.id);
+        const taken = registryError.code === "23505";
+        return res.status(taken ? 409 : 500).json({
+          success: false,
+          message: taken
+            ? "This email is already registered as a partner under a different organization"
+            : "Could not register the partner's login",
+        });
+      }
+      registryData = inserted;
     }
-
-    console.log("Partner registry inserted:", registryData);
 
     return res.status(201).json({
       success: true,
-      data,
+      data: withoutSecrets(data),
       registry: registryData,
     });
   } catch (err) {
@@ -151,7 +150,7 @@ export const createPartner = async (req, res, next) => {
 export const updatePartner = async (req, res, next) => {
   try {
     const db = tenantDb(req);
-    const updates = { ...req.body };
+    const { id, created_at, password_hash, ...updates } = req.body || {};
 
     let oldEmail = null;
     if (updates.email) {
@@ -188,11 +187,11 @@ export const updatePartner = async (req, res, next) => {
 
     // Keep registry in sync if email changed
     if (updates.email && oldEmail && oldEmail !== updates.email) {
-      await publicDb().from("partner_registry").delete().eq("email", oldEmail);
-      await publicDb().from("partner_registry").upsert({ email: updates.email, schema_name: req.tenantSchema });
+      await publicDb().from("partner_registry").delete().eq("email", oldEmail).eq("schema_name", req.tenantSchema);
+      await publicDb().from("partner_registry").insert({ email: updates.email, schema_name: req.tenantSchema });
     }
 
-    res.status(200).json({ success: true, data });
+    res.status(200).json({ success: true, data: withoutSecrets(data) });
   } catch (err) {
     next(err);
   }
@@ -211,7 +210,7 @@ export const deletePartner = async (req, res, next) => {
 
     // Remove from public registry
     if (partner?.email) {
-      await publicDb().from("partner_registry").delete().eq("email", partner.email);
+      await publicDb().from("partner_registry").delete().eq("email", partner.email).eq("schema_name", req.tenantSchema);
     }
 
     res.status(200).json({ success: true, message: "Partner deleted" });

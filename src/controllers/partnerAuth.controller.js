@@ -40,18 +40,10 @@ export const partnerLogin = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
-    // Step 3: Validate password (support both bcrypt and plain → auto-upgrade to bcrypt)
-    const isBcryptHash = partner.password && partner.password.startsWith("$2");
-    let isValid;
-    if (isBcryptHash) {
-      isValid = await bcrypt.compare(password, partner.password);
-    } else {
-      isValid = partner.password === password;
-      if (isValid) {
-        const hashed = await bcrypt.hash(password, 10);
-        await db.from("partners").update({ password: hashed }).eq("id", partner.id);
-      }
-    }
+    // Every tenant's partner passwords are bcrypt hashes; never compare plaintext.
+    const isValid = partner.password?.startsWith("$2")
+      ? await bcrypt.compare(password, partner.password)
+      : false;
 
     if (!isValid) {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
@@ -103,7 +95,8 @@ export const getPartnerMe = async (req, res, next) => {
 export const updatePartnerProfile = async (req, res, next) => {
   try {
     const db = tenantDb(req);
-    const allowed = ["phone", "address", "city", "state", "pin_code", "profile_image_url", "date_of_birth"];
+    // profile_image_url is only set by the avatar upload endpoint.
+    const allowed = ["phone", "address", "city", "state", "pin_code", "date_of_birth"];
     const updates = {};
     for (const k of allowed) {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
@@ -147,13 +140,9 @@ export const changePartnerPassword = async (req, res, next) => {
       .single();
     if (fetchErr) throw fetchErr;
 
-    const isBcryptHash = partner.password && partner.password.startsWith("$2");
-    let valid;
-    if (isBcryptHash) {
-      valid = await bcrypt.compare(current_password, partner.password);
-    } else {
-      valid = partner.password === current_password;
-    }
+    const valid = partner.password?.startsWith("$2")
+      ? await bcrypt.compare(current_password, partner.password)
+      : false;
     if (!valid) return res.status(401).json({ success: false, message: "Current password incorrect" });
 
     const newHash = await bcrypt.hash(new_password, 10);
@@ -194,10 +183,9 @@ export const uploadAvatar = async (req, res, next) => {
     const partnerId = req.user.id;
 
     const { data: existing } = await db.from("partners").select("profile_image_url").eq("id", partnerId).single();
-    await deleteLocalFile(existing?.profile_image_url);
+    await deleteLocalFile(existing?.profile_image_url, req.tenantSchema);
 
-    const filename = `${partnerId}_${Date.now()}.${ext}`;
-    const avatarUrl = await saveFile(req.file.buffer, "avatars", filename);
+    const avatarUrl = await saveFile(req.file.buffer, req.tenantSchema, "avatars", `avatar.${ext}`);
 
     const { data, error } = await db
       .from("partners")
@@ -222,7 +210,7 @@ export const deleteAvatar = async (req, res, next) => {
     const partnerId = req.user.id;
 
     const { data: existing } = await db.from("partners").select("profile_image_url").eq("id", partnerId).single();
-    await deleteLocalFile(existing?.profile_image_url);
+    await deleteLocalFile(existing?.profile_image_url, req.tenantSchema);
 
     const { data, error } = await db
       .from("partners")
@@ -248,7 +236,7 @@ function _toProfileResponse(p, trialInfo = {}) {
     avatar_url: p.profile_image_url,
     date_of_birth: p.date_of_birth,
     partner_id: p.partner_code || "",
-    member_since: p.member_since || "",
+    member_since: p.member_since || p.joined_date || p.created_at || "",
     tier: p.tier || "Standard",
     address: p.address,
     city: p.city,

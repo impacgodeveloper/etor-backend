@@ -275,7 +275,7 @@
 //     next(err);
 //   }
 // };
-import { tenantDb } from "../utils/tenantDb.js";
+import { tenantDb, publicDb } from "../utils/tenantDb.js";
 import { getDirectReportIds } from "../utils/hierarchy.js";
 import { saveFile, deleteLocalFile } from "../utils/localStorage.js";
 // employee_id is usually an employee_accounts id, but has no FK constraint —
@@ -293,7 +293,7 @@ const _attachEmployeeInfo = async (req, rows) => {
 
   const [{ data: employees }, { data: admins }] = await Promise.all([
     db.from("employee_accounts").select("id, name, role_title").in("id", ids),
-    db.from("admin_users").select("id, name, role").in("id", ids),
+    publicDb().from("admin_users").select("id, name, role").in("id", ids).eq("tenant_schema", req.tenantSchema),
   ]);
 
   const infoById = new Map();
@@ -311,8 +311,12 @@ const _attachEmployeeInfoSingle = async (req, row) => (await _attachEmployeeInfo
 // True if the caller (from the JWT) is the super admin, i.e. their id is an
 // admin_users row rather than an employee_accounts row.
 const _isCallerSuperAdmin = async (req) => {
-  const db = tenantDb(req);
-  const { data } = await db.from("admin_users").select("id").eq("id", req.user.id).maybeSingle();
+  const { data } = await publicDb()
+    .from("admin_users")
+    .select("id")
+    .eq("id", req.user.id)
+    .eq("tenant_schema", req.tenantSchema)
+    .maybeSingle();
   return !!data;
 };
 
@@ -401,8 +405,7 @@ export const createExpense = async (req, res, next) => {
     let receipt_url = null;
     let receipt_file_name = null;
     if (req.file) {
-      const filename = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-      receipt_url = await saveFile(req.file.buffer, "receipts", filename);
+      receipt_url = await saveFile(req.file.buffer, req.tenantSchema, "receipts", req.file.originalname);
       receipt_file_name = req.file.originalname;
     }
 
@@ -462,6 +465,88 @@ const _resolveExpenseAndAuthorize = async (req) => {
     return { error: { status: 403, message: "You are not authorized to act on this expense" } };
   }
   return { expense };
+};
+
+// PUT /api/travel-expenses/:id  (multipart; every field optional, "file" replaces the receipt)
+// Only the person who submitted it can edit, and only while it is pending or
+// rejected. Editing a rejected expense resubmits it for approval.
+export const updateExpense = async (req, res, next) => {
+  try {
+    const db = tenantDb(req);
+
+    const { data: expense, error: fetchError } = await db
+      .from("travel_expenses").select("*").eq("id", req.params.id).maybeSingle();
+    if (fetchError || !expense) return res.status(404).json({ success: false, message: "Expense not found" });
+    if (expense.employee_id !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Only the person who submitted this expense can edit it" });
+    }
+    if (!["pending", "rejected"].includes(expense.status)) {
+      return res.status(400).json({ success: false, message: `An ${expense.status} expense can no longer be edited` });
+    }
+
+    const b = req.body || {};
+    const fields = {
+      tripPurpose: "trip_purpose", travelDateFrom: "travel_date_from", travelDateTo: "travel_date_to",
+      fromLocation: "from_location", toLocation: "to_location", modeOfTravel: "mode_of_travel",
+      category: "category", amount: "amount", currency: "currency", paidBy: "paid_by", description: "description",
+    };
+    const required = ["tripPurpose", "travelDateFrom", "fromLocation", "toLocation", "modeOfTravel", "category", "amount", "paidBy"];
+    const updates = {};
+    for (const [key, column] of Object.entries(fields)) {
+      if (b[key] === undefined) continue;
+      const value = typeof b[key] === "string" ? b[key].trim() : b[key];
+      if (required.includes(key) && (value === "" || value === null)) {
+        return res.status(400).json({ success: false, message: `${key} can't be empty` });
+      }
+      updates[column] = value === "" ? null : value;
+    }
+    if (updates.paid_by !== undefined && !["company", "employee"].includes(updates.paid_by)) {
+      return res.status(400).json({ success: false, message: "paidBy must be 'company' or 'employee'" });
+    }
+    if (updates.amount !== undefined) {
+      const amount = Number(updates.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({ success: false, message: "amount must be a positive number" });
+      }
+      updates.amount = amount;
+    }
+
+    let oldReceipt = null;
+    if (req.file) {
+      updates.receipt_url = await saveFile(req.file.buffer, req.tenantSchema, "receipts", req.file.originalname);
+      updates.receipt_file_name = req.file.originalname;
+      oldReceipt = expense.receipt_url;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to update" });
+    }
+
+    // Same rule as createExpense: company-vehicle trips need no sign-off.
+    const mode = updates.mode_of_travel ?? expense.mode_of_travel;
+    if (mode === "Company Vehicle") {
+      Object.assign(updates, {
+        status: "approved",
+        approved_at: new Date().toISOString(),
+        rejected_at: null,
+        admin_note: "Auto-approved — company vehicle, no manager approval required",
+      });
+    } else if (expense.status === "rejected") {
+      Object.assign(updates, { status: "pending", rejected_at: null, admin_note: null });
+    }
+
+    const { data, error } = await db
+      .from("travel_expenses")
+      .update(updates)
+      .eq("id", req.params.id)
+      .select(EXPENSE_SELECT)
+      .single();
+    if (error) throw error;
+    if (oldReceipt) await deleteLocalFile(oldReceipt, req.tenantSchema);
+
+    res.status(200).json({ success: true, data: await _attachEmployeeInfoSingle(req, data) });
+  } catch (err) {
+    next(err);
+  }
 };
 
 // PATCH /api/travel-expenses/:id/status
@@ -549,7 +634,7 @@ export const deleteExpense = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Only pending expenses can be deleted" });
     }
 
-    await deleteLocalFile(expense.receipt_url);
+    await deleteLocalFile(expense.receipt_url, req.tenantSchema);
 
     const { error } = await db.from("travel_expenses").delete().eq("id", req.params.id);
     if (error) throw error;
